@@ -95,7 +95,7 @@ final class Core implements AutoCloseable {
         executor = config.executor() != null ? config.executor() : ownedExecutor;
         engine = new Engine(this);
         var feeds = new ArrayList<CatalogFeed>(config.catalog().feeds());
-        bundles.forEach(b -> feeds.addAll(b.catalogFeeds()));
+        if (config.catalog().discoveredFeeds()) bundles.forEach(b -> feeds.addAll(b.catalogFeeds()));
         catalog = new CatalogService(providers, config.catalog(), () -> shipped(bundles), feeds, new CatalogService.Access() {
             @Override public ProviderHttp http(Provider provider, CredentialStore store) { return providerHttp(provider, store); }
             @Override public boolean configured(Provider provider, CredentialStore store) { return resolver.configured(provider, store); }

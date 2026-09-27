@@ -10,9 +10,12 @@ import java.util.List;
 import java.util.Map;
 
 import net.ai.gate.cache.CacheRetention;
+import net.ai.gate.json.Json;
+import net.ai.gate.json.JsonObject;
 import net.ai.gate.model.Model;
 import net.ai.gate.vendors.openai.OpenAiCompatible;
 import net.ai.gate.vendors.openai.OpenAiCompletionsCompat;
+import net.ai.gate.vendors.openai.OpenAiCompletionsCompat.ReasoningFormat;
 import org.junit.jupiter.api.Test;
 
 /// Secret-free, versioned provider configuration that states only differences from presets.
@@ -79,17 +82,27 @@ class ProvidersConfigTest {
     }
 
     @Test
-    void writingADifferentCompatThanTheBaseFails() {
-        var provider = OpenAiCompatible.custom("corp-gw2", URI.create("https://gw2.example/v1")).toBuilder()
-                .compat(OpenAiCompletionsCompat.builder().developerRole(true).build()).build();
-        var error = assertThrows(IllegalArgumentException.class, () -> ProvidersConfig.write(List.of(provider)));
-        assertTrue(error.getMessage().contains("corp-gw2"), error.getMessage());
+    void compatFlagsRoundTripAsDifferencesFromThePreset() {
+        var flags = OpenAiCompletionsCompat.builder().reasoningFormat(ReasoningFormat.QWEN).maxTokensField("max_tokens").developerRole(false).build();
+        var vllm = Providers.vllm().toBuilder().compat(flags)
+                .model(Model.builder("vllm", "qwen3").compat(OpenAiCompletionsCompat.builder().streamUsage(false).build()).build()).build();
+        var json = ProvidersConfig.write(List.of(vllm));
+        var entry = ((JsonObject) Json.parse(json)).objects("providers").getFirst();
+        assertEquals(Json.object("reasoningFormat", "qwen"), entry.get("compat").orElseThrow(), "only what differs from the preset: " + json);
+        assertEquals(Json.object("streamUsage", false), entry.objects("models").getFirst().get("compat").orElseThrow());
+
+        var restored = ProvidersConfig.read(json, Providers.presets()).getFirst();
+        assertEquals(vllm.compat(), restored.compat());
+        assertEquals(vllm.models().getFirst().compat(), restored.models().getFirst().compat());
+        assertFalse(ProvidersConfig.write(List.of(Providers.vllm())).contains("compat"));
     }
 
     @Test
-    void readingACompatMemberFails() {
-        var json = "{\"schema\": \"ai-gate.providers/1\", \"providers\": [{\"preset\": \"openai\", \"compat\": {}}]}";
+    void unknownCompatFieldsFailNamingThem() {
+        var json = "{\"schema\": \"ai-gate.providers/1\", \"providers\": [{\"preset\": \"vllm\", \"compat\": {\"reasoningFormat\": \"qwen\", "
+                + "\"thinkHarder\": true, \"x-note\": \"ignored\"}}]}";
         var error = assertThrows(IllegalArgumentException.class, () -> ProvidersConfig.read(json, Providers.presets()));
-        assertTrue(error.getMessage().contains("not supported"), error.getMessage());
+        assertTrue(error.getMessage().contains("thinkHarder"), error.getMessage());
+        assertFalse(error.getMessage().contains("x-note"), error.getMessage());
     }
 }

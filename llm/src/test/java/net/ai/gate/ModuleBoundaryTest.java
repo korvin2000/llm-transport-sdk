@@ -82,7 +82,7 @@ class ModuleBoundaryTest {
         var output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         assertTrue(process.waitFor(60, TimeUnit.SECONDS));
         assertEquals(0, process.exitValue(), output);
-        assertTrue(output.trim().endsWith("from the module path|call|oauth|12|false|true"), output);
+        assertTrue(output.trim().endsWith("from the module path|call|oauth|13|false|true"), output);
     }
 
     @Test
@@ -104,6 +104,6 @@ class ModuleBoundaryTest {
         var output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         assertTrue(process.waitFor(60, TimeUnit.SECONDS));
         assertEquals(0, process.exitValue(), output);
-        assertTrue(output.trim().endsWith("from the module path|call|oauth|12|false|false"), output);
+        assertTrue(output.trim().endsWith("from the module path|call|oauth|13|false|false"), output);
     }
 }

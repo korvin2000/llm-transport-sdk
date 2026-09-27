@@ -29,11 +29,10 @@ public final class JdkHttpTransport implements HttpTransport {
     private final String userAgent;
 
     public JdkHttpTransport(HttpOptions options, Duration connectTimeout) {
-        if (options.trustStore().isPresent() || options.clientCertificate().isPresent() || options.insecureSkipTlsVerification())
-            throw new UnsupportedOperationException("Custom TLS settings are not implemented yet (roadmap slice 1)");
         var builder = HttpClient.newBuilder().version(options.httpVersion()).followRedirects(HttpClient.Redirect.NEVER)
                 .connectTimeout(connectTimeout);
         options.proxy().ifPresent(builder::proxy);
+        options.sslContext().ifPresent(builder::sslContext);
         client = builder.build();
         userAgent = "ai-gate/0.1 Java/" + Runtime.version().feature() + options.userAgentSuffix().map(s -> " " + s).orElse("");
     }
@@ -44,7 +43,8 @@ public final class JdkHttpTransport implements HttpTransport {
         call.headers().forEach(request::header);
         if (call.body().isPresent() && call.headers().keySet().stream().noneMatch("content-type"::equalsIgnoreCase))
             request.header("Content-Type", "application/json");
-        if (options.streaming()) request.header("Accept", "text/event-stream, application/x-ndjson, application/json");
+        if (options.streaming() && call.headers().keySet().stream().noneMatch("accept"::equalsIgnoreCase))
+            request.header("Accept", "text/event-stream, application/x-ndjson, application/json");
         if (isLoopbackCleartext(call.uri())) request.version(HttpClient.Version.HTTP_1_1);
         options.responseTimeout().ifPresent(request::timeout);
         try {

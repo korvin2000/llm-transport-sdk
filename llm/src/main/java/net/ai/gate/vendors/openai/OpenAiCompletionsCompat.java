@@ -1,7 +1,6 @@
 package net.ai.gate.vendors.openai;
 
-import java.util.Objects;
-
+import net.ai.gate.json.JsonObject;
 import net.ai.gate.spi.protocol.ApiCompat;
 import org.jspecify.annotations.Nullable;
 
@@ -12,6 +11,8 @@ public final class OpenAiCompletionsCompat implements ApiCompat {
     public enum ReasoningFormat { OPENAI, OPENROUTER, DEEPSEEK, QWEN, ZAI, TOGETHER, CHAT_TEMPLATE, NONE }
     public enum CacheControl { NONE, ANTHROPIC_STYLE }
     public enum SessionHeader { NONE, OPENAI, OPENROUTER }
+    /// Tool-call ids as sent: as they are, or `MISTRAL` — exactly nine letters and digits.
+    public enum ToolCallIdFormat { ANY, MISTRAL }
 
     private static final OpenAiCompletionsCompat DEFAULTS = builder().build();
 
@@ -20,16 +21,38 @@ public final class OpenAiCompletionsCompat implements ApiCompat {
     private final @Nullable ReasoningFormat reasoningFormat;
     private final @Nullable CacheControl cacheControl;
     private final @Nullable SessionHeader sessionHeader;
+    private final @Nullable ToolCallIdFormat toolCallIdFormat;
 
     private OpenAiCompletionsCompat(Builder b) {
         maxTokensField = b.maxTokensField; developerRole = b.developerRole; streamUsage = b.streamUsage; strictTools = b.strictTools;
         reasoningContentReplay = b.reasoningContentReplay; reasoningFormat = b.reasoningFormat; cacheControl = b.cacheControl;
-        sessionHeader = b.sessionHeader;
+        sessionHeader = b.sessionHeader; toolCallIdFormat = b.toolCallIdFormat;
     }
 
     /// Every flag at its documented default — what `EncodeContext.compat(…)` merges onto.
     public static OpenAiCompletionsCompat defaults() { return DEFAULTS; }
     public static Builder builder() { return new Builder(); }
+
+    /// Reads [#toJson()]'s form.
+    /// @throws IllegalArgumentException naming a member that is unknown or of the wrong type
+    public static OpenAiCompletionsCompat fromJson(JsonObject json) {
+        var b = builder();
+        json.members().forEach((name, value) -> {
+            switch (name) {
+                case "maxTokensField" -> b.maxTokensField(ApiCompat.text(value, name));
+                case "developerRole" -> b.developerRole(ApiCompat.flag(value, name));
+                case "streamUsage" -> b.streamUsage(ApiCompat.flag(value, name));
+                case "strictTools" -> b.strictTools(ApiCompat.flag(value, name));
+                case "reasoningContentReplay" -> b.reasoningContentReplay(ApiCompat.flag(value, name));
+                case "reasoningFormat" -> b.reasoningFormat(ApiCompat.choice(value, name, ReasoningFormat.class));
+                case "cacheControl" -> b.cacheControl(ApiCompat.choice(value, name, CacheControl.class));
+                case "sessionHeader" -> b.sessionHeader(ApiCompat.choice(value, name, SessionHeader.class));
+                case "toolCallIdFormat" -> b.toolCallIdFormat(ApiCompat.choice(value, name, ToolCallIdFormat.class));
+                default -> ApiCompat.unknown(name);
+            }
+        });
+        return b.build();
+    }
 
     @Override public String api() { return "openai-completions"; }
 
@@ -46,6 +69,7 @@ public final class OpenAiCompletionsCompat implements ApiCompat {
     public ReasoningFormat reasoningFormat() { return reasoningFormat != null ? reasoningFormat : ReasoningFormat.OPENAI; }
     public CacheControl cacheControl() { return cacheControl != null ? cacheControl : CacheControl.NONE; }
     public SessionHeader sessionHeader() { return sessionHeader != null ? sessionHeader : SessionHeader.NONE; }
+    public ToolCallIdFormat toolCallIdFormat() { return toolCallIdFormat != null ? toolCallIdFormat : ToolCallIdFormat.ANY; }
 
     @Override public ApiCompat overriddenBy(ApiCompat higher) {
         if (!(higher instanceof OpenAiCompletionsCompat h)) throw new IllegalArgumentException("Cannot merge " + higher + " into " + this);
@@ -58,27 +82,26 @@ public final class OpenAiCompletionsCompat implements ApiCompat {
         if (h.reasoningFormat != null) b.reasoningFormat = h.reasoningFormat;
         if (h.cacheControl != null) b.cacheControl = h.cacheControl;
         if (h.sessionHeader != null) b.sessionHeader = h.sessionHeader;
+        if (h.toolCallIdFormat != null) b.toolCallIdFormat = h.toolCallIdFormat;
         return b.build();
+    }
+
+    @Override public JsonObject toJson() {
+        return ApiCompat.json("maxTokensField", maxTokensField, "developerRole", developerRole, "streamUsage", streamUsage,
+                "strictTools", strictTools, "reasoningContentReplay", reasoningContentReplay, "reasoningFormat", reasoningFormat,
+                "cacheControl", cacheControl, "sessionHeader", sessionHeader, "toolCallIdFormat", toolCallIdFormat);
     }
 
     public Builder toBuilder() {
         var b = new Builder();
         b.maxTokensField = maxTokensField; b.developerRole = developerRole; b.streamUsage = streamUsage; b.strictTools = strictTools;
         b.reasoningContentReplay = reasoningContentReplay; b.reasoningFormat = reasoningFormat; b.cacheControl = cacheControl;
-        b.sessionHeader = sessionHeader;
+        b.sessionHeader = sessionHeader; b.toolCallIdFormat = toolCallIdFormat;
         return b;
     }
 
-    @Override public boolean equals(Object o) {
-        return o instanceof OpenAiCompletionsCompat c && Objects.equals(maxTokensField, c.maxTokensField)
-                && Objects.equals(developerRole, c.developerRole) && Objects.equals(streamUsage, c.streamUsage)
-                && Objects.equals(strictTools, c.strictTools) && Objects.equals(reasoningContentReplay, c.reasoningContentReplay)
-                && reasoningFormat == c.reasoningFormat && cacheControl == c.cacheControl && sessionHeader == c.sessionHeader;
-    }
-
-    @Override public int hashCode() {
-        return Objects.hash(maxTokensField, developerRole, streamUsage, strictTools, reasoningContentReplay, reasoningFormat, cacheControl, sessionHeader);
-    }
+    @Override public boolean equals(Object o) { return o instanceof OpenAiCompletionsCompat c && toJson().equals(c.toJson()); }
+    @Override public int hashCode() { return toJson().hashCode(); }
 
     @Override public String toString() {
         return "OpenAiCompletionsCompat[maxTokensField=" + maxTokensField() + ", developerRole=" + developerRole()
@@ -92,6 +115,7 @@ public final class OpenAiCompletionsCompat implements ApiCompat {
         private @Nullable ReasoningFormat reasoningFormat;
         private @Nullable CacheControl cacheControl;
         private @Nullable SessionHeader sessionHeader;
+        private @Nullable ToolCallIdFormat toolCallIdFormat;
 
         private Builder() { }
 
@@ -108,6 +132,7 @@ public final class OpenAiCompletionsCompat implements ApiCompat {
         public Builder reasoningFormat(ReasoningFormat value) { reasoningFormat = value; return this; }
         public Builder cacheControl(CacheControl value) { cacheControl = value; return this; }
         public Builder sessionHeader(SessionHeader value) { sessionHeader = value; return this; }
+        public Builder toolCallIdFormat(ToolCallIdFormat value) { toolCallIdFormat = value; return this; }
         public OpenAiCompletionsCompat build() { return new OpenAiCompletionsCompat(this); }
     }
 }

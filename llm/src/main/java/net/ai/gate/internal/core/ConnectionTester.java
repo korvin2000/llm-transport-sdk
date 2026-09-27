@@ -23,7 +23,6 @@ import net.ai.gate.error.AuthenticationException;
 import net.ai.gate.error.LlmException;
 import net.ai.gate.model.Model;
 import net.ai.gate.spi.http.HttpCall;
-import net.ai.gate.spi.http.HttpReply;
 import net.ai.gate.spi.http.TransportOptions;
 import org.jspecify.annotations.Nullable;
 

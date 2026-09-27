@@ -194,3 +194,107 @@ package plan and the P1/P2 fixes below take the stronger option of each. Build: 
 Vendor codecs, OAuth network flows, models.dev feed, `Gemini.CACHES`, custom TLS, `compat` in `ProvidersConfig`
 (explicitly rejected, never silently dropped), per-field catalog provenance, account binding of `Content.fileRef`,
 `ScopedValue` call context (explicit `Call` object kept on purpose).
+
+---
+
+# Session 3 — second implementation phase (2026-09-27)
+
+Input: `second_phase.md`. References: `examples/ai` (pi-ai TypeScript: codecs, OAuth, models.dev generator) for wire
+details; `examples2` (Spring-based) cross-checked for RFC 8628 / refresh semantics only — nothing imported.
+
+## Done (all offline-verified; `./gradlew clean build` green)
+- Codecs: `CompletionsCodec` (compat flags: reasoning formats, max-tokens field, developer role, `reasoning_content`
+  replay, Anthropic-style cache markers, session headers; `[DONE]`/usage chunks), `ResponsesCodec` (stateless
+  `store:false`, encrypted reasoning replay, citations, typed SSE with authoritative `output_item.done` parts),
+  `MessagesCodec` (adaptive vs budget thinking by model id, signed/redacted thinking replay, ≤4 cache markers + 1h TTL,
+  hosted tools + betas, `output_config`), `GenerateContentCodec` (thinking level vs budget, thought signatures on any
+  part re-attached on replay, synthesized call ids, JSON-schema output), `CachesClient` (create/get/list/extend/delete).
+- Shared codec steps: `spi.protocol.Codecs`; JSON accessors `JsonObject.array/objects/optString/optLong/bool`.
+- OAuth: `StandardOAuth` (PKCE S256 via `Loopback` listener, pasted code, `RedirectInteraction`; device code; refresh
+  rotation keeping the account; RFC 7009 revoke), `OAuthAuth.revoke` default, `OAuthConfig.redirectParameter` /
+  `jsonTokenRequests` (OpenRouter dialect), `DefaultAuth.revoke` revokes remotely.
+- Catalog: `ModelsDevFeed` mapping (explicit provider map, effort → levels, budget/toggle ⇒ switchable, tiers,
+  deprecated); `CatalogOptions.feeds(List)` excludes discovered feeds (hermetic tests); `./gradlew updateModelCatalog`
+  regenerated `models.json` (184 text models, no OpenRouter, no deprecated).
+- TLS: `HttpOptions.sslContext()` (trust store, client cert, insecure via extended trust manager) used by the JDK
+  transport.
+- Tests: `vendors/*WireTest` (13, scripted endpoint `WireScript`), `StandardOAuthTest` (5, in-process issuer),
+  `ModelsDevFeedTest` (pinned sample + regeneration), `HttpOptionsTest`; stub-asserting tests updated.
+
+## Decisions
+- Thinking format chosen by model id where the API differs by generation (as the reference does), overridable by
+  typed options' `thinkingBudget`.
+- Confidential OAuth clients / client-credentials grant: rejected explicitly (no store access in the SPI).
+- `compat` in `ProvidersConfig`, per-field provenance, `fileRef` account binding, `ScopedValue` context: unchanged.
+
+## Not verified
+- No calls against real provider endpoints (no keys in this environment); fixtures follow the documented wire formats.
+
+---
+
+# Session 4 — step three (2026-09-27)
+
+Input: `step_three.md` (tasks 1, 4–9). Build: `./gradlew clean build --offline` green (`-Xlint:all -Werror`, doclint,
+ArchUnit); 186 tests (173 + 13), 0 failures, 2 expected skips; `./gradlew liveTest` added (4 cases, skipped without keys).
+
+## Done
+- **Codex (ChatGPT Plus/Pro), task 1:** `OpenAi.codex()` (id `openai-codex`, base `https://chatgpt.com/backend-api/codex`,
+  header `originator: ai-gate`), registered in `OpenAiBundle`/`Providers`. OAuth via `StandardOAuth` with three small
+  `OAuthConfig` additions — `authorizationParameter`, `accountClaim(path…)` + `accountHeader(name)` (the account id
+  from the access-token claim `https://api.openai.com/auth`.`chatgpt_account_id`, sent as `chatgpt-account-id`) and
+  `DeviceDialect.OPENAI` (JSON `…/deviceauth/usercode` + `…/deviceauth/token`, 403/404 = pending, code + verifier
+  exchanged with redirect `/deviceauth/callback`, page `/codex/device`) merged into the one device loop. Transport:
+  new `OpenAiResponsesCompat` (`streamingOnly`, `defaultInstructions`, `maxOutputTokens`, `sessionHeaders`) on
+  `ResponsesCodec`. Stream-only endpoints: `Engine.complete` reads a `text/event-stream` reply through the stream
+  pipeline (same result, cached as frames) — generic, no SPI change. Plan limits (`usage_limit_reached`,
+  `usage_not_included`, also OpenAI's `insufficient_quota`) → `quota_exhausted`, never retried. Catalog:
+  `ModelsDevFeed.CODEX` copies the Codex client's models (gpt-6-astra/sol/luna, gpt-5.6-sol/terra/luna, gpt-5.5) from
+  `openai` to `openai-codex` with the 272k window and no per-token prices.
+- **Media outputs, task 4:** `Content.Image` got `providerData` (replay data, like `Reasoning`); Gemini `inlineData`
+  → `Image`/`Audio` (format = MIME subtype) and back to `inlineData` in the model turn; Responses
+  `image_generation_call` → `Image` (item without `result` as provider data; replayed as `{type,id,status,result}`);
+  Chat Completions `message.audio` / `delta.audio` → `Audio` with transcript (replayed as the transcript: audio ids
+  expire). `Handoff`: foreign images omitted, foreign audio → transcript (`history_adapted`). `ConversationJson` and
+  `Accumulator.sizeOf` carry `providerData`. `OpenAiTools.imageGeneration()`.
+- **Anthropic, task 5:** citations → `Content.Citation` over the whole block (`document:<i>`, `search-result:<i>`
+  without URL), `citations_delta` accumulated to an authoritative `PartEnd`; replay as plain text. Forced tool
+  choice → `auto` (`option_adapted`, strict fails) under budget thinking and on Opus 5.5 / Fable 5.1 / Mythos 5.1
+  (adaptive thinking may force a tool per current docs).
+- **Sampling, task 6:** `Capability.TEMPERATURE` from models.dev `temperature`; `Codecs.sampling(request, ctx,
+  reasoningRejects)` drops temperature/topP/topK with `option_dropped` via `ctx.warn` — used by all four codecs
+  (OpenAI family heuristic `o1…/gpt-5+` while reasoning; Claude while thinking, now warn instead of adapt).
+  `Engine.finish` logs reply warnings once at `INFO` on `net.ai.gate`.
+- **Mistral, task 7:** `OpenAiCompletionsCompat.ToolCallIdFormat.MISTRAL` on the preset: foreign ids → nine base-62
+  characters of a name-based UUID, collisions probed, native nine-character ids kept.
+- **compat in `ProvidersConfig`, task 8:** `ApiCompat.toJson()` + static helpers (`json/flag/text/choice/unknown`);
+  `fromJson` on the three compat types (unknown field fails by name, `x-` ignored); read by the default API's type
+  (plain switch), written as the difference from the preset (unsetting a preset flag fails); per-model `compat` too.
+- **Research, task 9** (sources below) — fixed: `MAX` → `max` (the catalog clamps to supported levels);
+  `prompt_cache_retention` not sent to GPT-5.6+/GPT-6 (`cache_hint_ignored`); `reasoning.encrypted_content` included
+  whenever the model reasons without server state; feed: a budget without toggle and minimum > 0 (Gemini 2.5 Pro) is
+  not switchable; Anthropic hosted tools (`code_execution` without beta, `web_fetch`, `computer_20251124` + beta);
+  Gemini function-call ids from the API sent back with the call and its response.
+- Regenerated `models.json` (191 models); removed four unused imports (three pre-existing).
+
+## Decisions
+- Redirect `http://127.0.0.1:1455/auth/callback` (what the Codex CLI now uses; the step file said `localhost`, which
+  pi-ai uses — both are loopback on 1455). No `OpenAI-Beta: responses=experimental`: the Codex CLI dropped it for HTTP.
+- `complete()` against a stream-only backend: core collects the event stream (smaller than an SSE parser per codec,
+  and it keeps caching, watchdog and cancellation).
+- Codex CLI login import (`~/.codex/auth.json`) not done: sharing a rotating refresh token signs one client out.
+- Generated audio replays as its transcript rather than `audio: {id}` (ids expire).
+
+## Not verified live
+- No keys in this environment: Codex login/transport, media generation, citations and all task-9 fixes follow the
+  documentation and reference clients; `./gradlew liveTest` is ready for the user.
+- Open items from the research: Gemini 3 tool-result media inside `functionResponse.parts`; OpenRouter
+  `reasoning_details` replay; Groq/xAI effort vocabularies (clamped by catalog levels only); Qwen `preserve_thinking`.
+
+## Sources (task 9)
+platform.claude.com/docs (extended-thinking, thinking, citations, search-results, web-search-tool, tool-reference);
+ai.google.dev/gemini-api/docs (thinking, caching, function-calling, speech-generation, image-generation) and the v1beta
+discovery document; developers.openai.com/api/docs/guides (latest-model, reasoning, prompt-caching,
+tools-image-generation, audio); github.com/openai/codex (codex-rs login server and device code, token_data,
+model-provider-info, codex-api headers/api_bridge, models-manager/models.json); api-docs.deepseek.com (thinking mode);
+openrouter.ai/docs (reasoning tokens, prompt caching); console.groq.com/docs/reasoning; docs.x.ai/docs/guides/reasoning;
+Mistral tool-call id reports (zed #53034, vercel/ai #11802); pi-ai `examples/ai` (openai-codex OAuth and transport).

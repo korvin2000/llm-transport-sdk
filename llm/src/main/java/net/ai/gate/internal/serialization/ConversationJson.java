@@ -151,6 +151,7 @@ public final class ConversationJson {
             json.put("mediaType", Json.valueOf(img.mediaType()));
             img.detail().ifPresent(d -> json.put("detail", Json.valueOf(d)));
             json.put("source", writeSource(img.source()));
+            if (!(img.providerData() instanceof JsonNull)) json.put("providerData", img.providerData());
         } else if (c instanceof Content.Document d) {
             json.put("type", Json.valueOf("document"));
             json.put("mediaType", Json.valueOf(d.mediaType()));
@@ -400,7 +401,8 @@ public final class ConversationJson {
         var mediaType = str(member(json, "mediaType", path + ".mediaType"), path + ".mediaType");
         if (!(member(json, "source", path + ".source") instanceof JsonObject so)) throw fail(path + ".source", "expected an object");
         var kind = str(member(so, "kind", path + ".source.kind"), path + ".source.kind");
-        return Content.Image.of(readSource(so, kind, path), mediaType, optString(json, "detail", path));
+        return Content.Image.of(readSource(so, kind, path), mediaType, optString(json, "detail", path),
+                json.get("providerData").orElse(JsonNull.INSTANCE));
     }
 
     /// A source of any kind; the media type travels beside it, so nothing is re-derived from a file name.

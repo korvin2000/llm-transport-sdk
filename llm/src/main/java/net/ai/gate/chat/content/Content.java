@@ -77,20 +77,34 @@ public sealed interface Content permits Content.Text, Content.Image, Content.Doc
         @Override public String toString() { return "Text[" + text.length() + " chars]"; }
     }
 
+    /// An image; one a model generated may carry opaque replay data for its origin, like [Reasoning].
     final class Image implements Content {
         private final Source source;
         private final String mediaType;
         private final @Nullable String detail;
-        private Image(Source source, String mediaType, @Nullable String detail) { this.source = source; this.mediaType = mediaType; this.detail = detail; }
+        private final JsonValue providerData;
+        private Image(Source source, String mediaType, @Nullable String detail) { this(source, mediaType, detail, JsonNull.INSTANCE); }
+        private Image(Source source, String mediaType, @Nullable String detail, JsonValue providerData) {
+            this.source = source; this.mediaType = mediaType; this.detail = detail; this.providerData = providerData;
+        }
         /// For codecs and serializers: any source with an explicit media type.
         public static Image of(Source source, String mediaType, @Nullable String detail) { return new Image(source, mediaType, detail); }
+        /// For codecs and serializers: a generated image with the data its API needs to replay it.
+        public static Image of(Source source, String mediaType, @Nullable String detail, JsonValue providerData) {
+            return new Image(source, mediaType, detail, providerData);
+        }
         public Source source() { return source; }
         public String mediaType() { return mediaType; }
         /// Resolution hint where APIs accept one: `low`, `high`, `auto`.
         public Optional<String> detail() { return Optional.ofNullable(detail); }
-        public Image withDetail(String value) { return new Image(source, mediaType, value); }
-        @Override public boolean equals(Object o) { return o instanceof Image i && source.equals(i.source) && mediaType.equals(i.mediaType) && Objects.equals(detail, i.detail); }
-        @Override public int hashCode() { return Objects.hash(source, mediaType, detail); }
+        /// Replay data of a generated image, valid only for the model that produced it; `JsonNull` otherwise.
+        public JsonValue providerData() { return providerData; }
+        public Image withDetail(String value) { return new Image(source, mediaType, value, providerData); }
+        @Override public boolean equals(Object o) {
+            return o instanceof Image i && source.equals(i.source) && mediaType.equals(i.mediaType) && Objects.equals(detail, i.detail)
+                    && providerData.equals(i.providerData);
+        }
+        @Override public int hashCode() { return Objects.hash(source, mediaType, detail, providerData); }
         @Override public String toString() { return "Image[" + mediaType + ", " + source + "]"; }
     }
 

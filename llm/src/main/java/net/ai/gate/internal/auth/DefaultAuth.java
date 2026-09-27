@@ -71,8 +71,8 @@ public final class DefaultAuth implements Auth {
     @Override public void logout(String providerId) { store.delete(providers.apply(providerId).id()); }
 
     @Override public void revoke(String providerId) {
-        if (store.read(providers.apply(providerId).id()).orElse(null) instanceof OAuthCredential)
-            throw new UnsupportedOperationException("OAuth token revocation is not implemented yet (roadmap slice 2); logout() removes it locally");
+        var provider = providers.apply(providerId);
+        if (store.read(provider.id()).orElse(null) instanceof OAuthCredential c) provider.oauthAuth().ifPresent(a -> a.revoke(c));
         logout(providerId);
     }
 

@@ -1,7 +1,6 @@
 package net.ai.gate.vendors.anthropic;
 
-import java.util.Objects;
-
+import net.ai.gate.json.JsonObject;
 import net.ai.gate.spi.protocol.ApiCompat;
 import org.jspecify.annotations.Nullable;
 
@@ -15,6 +14,20 @@ public final class AnthropicCompat implements ApiCompat {
 
     public static AnthropicCompat defaults() { return DEFAULTS; }
     public static Builder builder() { return new Builder(); }
+
+    /// Reads [#toJson()]'s form.
+    /// @throws IllegalArgumentException naming a member that is unknown or of the wrong type
+    public static AnthropicCompat fromJson(JsonObject json) {
+        var b = builder();
+        json.members().forEach((name, value) -> {
+            switch (name) {
+                case "betaHeaders" -> b.betaHeaders(ApiCompat.flag(value, name));
+                case "cacheTtl" -> b.cacheTtl(ApiCompat.flag(value, name));
+                default -> ApiCompat.unknown(name);
+            }
+        });
+        return b.build();
+    }
 
     @Override public String api() { return Anthropic.MESSAGES.id(); }
 
@@ -31,8 +44,10 @@ public final class AnthropicCompat implements ApiCompat {
         return b.build();
     }
 
-    @Override public boolean equals(Object o) { return o instanceof AnthropicCompat c && Objects.equals(betaHeaders, c.betaHeaders) && Objects.equals(cacheTtl, c.cacheTtl); }
-    @Override public int hashCode() { return Objects.hash(betaHeaders, cacheTtl); }
+    @Override public JsonObject toJson() { return ApiCompat.json("betaHeaders", betaHeaders, "cacheTtl", cacheTtl); }
+
+    @Override public boolean equals(Object o) { return o instanceof AnthropicCompat c && toJson().equals(c.toJson()); }
+    @Override public int hashCode() { return toJson().hashCode(); }
     @Override public String toString() { return "AnthropicCompat[betaHeaders=" + betaHeaders() + ", cacheTtl=" + cacheTtl() + "]"; }
 
     /// Not thread-safe.

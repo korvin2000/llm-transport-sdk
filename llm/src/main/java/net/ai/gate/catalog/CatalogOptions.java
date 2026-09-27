@@ -16,12 +16,12 @@ public final class CatalogOptions {
     private static final CatalogOptions DEFAULTS = new Builder().build();
 
     private final Duration refreshInterval;
-    private final boolean background, offline, feeds, liveListings;
+    private final boolean background, offline, feeds, discoveredFeeds, liveListings;
     private final List<CatalogFeed> addedFeeds;
     private final @Nullable Path snapshotFile;
 
     private CatalogOptions(Builder b) {
-        refreshInterval = b.refreshInterval; background = b.background; offline = b.offline; feeds = b.feeds;
+        refreshInterval = b.refreshInterval; background = b.background; offline = b.offline; feeds = b.feeds; discoveredFeeds = b.discoveredFeeds;
         liveListings = b.liveListings; addedFeeds = List.copyOf(b.addedFeeds); snapshotFile = b.snapshotFile;
     }
 
@@ -35,13 +35,15 @@ public final class CatalogOptions {
     public boolean offline() { return offline; }
     public boolean feedsEnabled() { return feeds && !offline; }
     public boolean liveListingsEnabled() { return liveListings && !offline; }
-    /// Feeds added by the host, in addition to discovered ones.
+    /// Feeds added by the host, in addition to discovered ones unless [#discoveredFeeds()] is false.
     public List<CatalogFeed> feeds() { return addedFeeds; }
+    /// Feeds contributed by provider bundles (models.dev) are used; `false` after [Builder#feeds(List)].
+    public boolean discoveredFeeds() { return discoveredFeeds; }
     public Optional<Path> snapshotFile() { return Optional.ofNullable(snapshotFile); }
 
     public Builder toBuilder() {
         var b = new Builder();
-        b.refreshInterval = refreshInterval; b.background = background; b.offline = offline; b.feeds = feeds;
+        b.refreshInterval = refreshInterval; b.background = background; b.offline = offline; b.feeds = feeds; b.discoveredFeeds = discoveredFeeds;
         b.liveListings = liveListings; b.addedFeeds.addAll(addedFeeds); b.snapshotFile = snapshotFile;
         return b;
     }
@@ -54,7 +56,7 @@ public final class CatalogOptions {
     /// Not thread-safe.
     public static final class Builder {
         private Duration refreshInterval = Duration.ofHours(24);
-        private boolean background = true, offline, feeds = true, liveListings = true;
+        private boolean background = true, offline, feeds = true, discoveredFeeds = true, liveListings = true;
         private final List<CatalogFeed> addedFeeds = new ArrayList<>();
         private @Nullable Path snapshotFile;
 
@@ -66,6 +68,13 @@ public final class CatalogOptions {
         public Builder offline() { offline = true; return this; }
         /// Adds a feed; discovered feeds are included by default.
         public Builder feed(CatalogFeed feed) { addedFeeds.add(feed); return this; }
+        /// Exactly these feeds: discovered ones are not used.
+        public Builder feeds(List<CatalogFeed> replaced) {
+            addedFeeds.clear();
+            addedFeeds.addAll(replaced);
+            discoveredFeeds = false;
+            return this;
+        }
         /// Live listings only.
         public Builder noFeeds() { feeds = false; return this; }
         /// Feeds only.

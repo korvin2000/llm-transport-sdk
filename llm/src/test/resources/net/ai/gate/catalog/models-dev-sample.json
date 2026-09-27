@@ -1,0 +1,341 @@
+{
+ "anthropic": {
+  "id": "anthropic",
+  "name": "Anthropic",
+  "models": {
+   "claude-sonnet-4-6": {
+    "id": "claude-sonnet-4-6",
+    "name": "Claude Sonnet 4.6",
+    "description": "Claude workhorse for coding agents, careful analysis, and production cost control",
+    "family": "claude-sonnet",
+    "attachment": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "effort",
+      "values": [
+       "low",
+       "medium",
+       "high",
+       "max"
+      ]
+     },
+     {
+      "type": "budget_tokens",
+      "min": 1024
+     }
+    ],
+    "tool_call": true,
+    "structured_output": true,
+    "temperature": true,
+    "knowledge": "2025-08-31",
+    "release_date": "2026-02-17",
+    "last_updated": "2026-03-13",
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": false,
+    "limit": {
+     "context": 1000000,
+     "output": 128000
+    },
+    "cost": {
+     "input": 3,
+     "output": 15,
+     "cache_read": 0.3,
+     "cache_write": 3.75
+    }
+   },
+   "claude-haiku-4-5-20251001": {
+    "id": "claude-haiku-4-5-20251001",
+    "name": "Claude Haiku 4.5",
+    "description": "Fast Claude model for responsive assistance, classification, and lightweight agents",
+    "family": "claude-haiku",
+    "attachment": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "budget_tokens",
+      "min": 1024
+     }
+    ],
+    "tool_call": true,
+    "structured_output": true,
+    "temperature": true,
+    "knowledge": "2025-02-28",
+    "release_date": "2025-10-15",
+    "last_updated": "2025-10-15",
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": false,
+    "limit": {
+     "context": 200000,
+     "output": 64000
+    },
+    "cost": {
+     "input": 1,
+     "output": 5,
+     "cache_read": 0.1,
+     "cache_write": 1.25
+    }
+   }
+  }
+ },
+ "google": {
+  "id": "google",
+  "models": {
+   "gemini-2.5-pro": {
+    "id": "gemini-2.5-pro",
+    "name": "Gemini 2.5 Pro",
+    "description": "Google's proven reasoning model for coding, math, and multimodal analysis",
+    "family": "gemini-pro",
+    "attachment": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "budget_tokens",
+      "min": 128,
+      "max": 32768
+     }
+    ],
+    "tool_call": true,
+    "structured_output": true,
+    "temperature": true,
+    "knowledge": "2025-01",
+    "release_date": "2025-06-17",
+    "last_updated": "2025-06-17",
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video",
+      "pdf"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": false,
+    "limit": {
+     "context": 1048576,
+     "output": 65536
+    },
+    "cost": {
+     "input": 1.25,
+     "output": 10,
+     "cache_read": 0.125,
+     "tiers": [
+      {
+       "input": 2.5,
+       "output": 15,
+       "cache_read": 0.25,
+       "tier": {
+        "type": "context",
+        "size": 200000
+       }
+      }
+     ],
+     "context_over_200k": {
+      "input": 2.5,
+      "output": 15,
+      "cache_read": 0.25
+     }
+    }
+   }
+  }
+ },
+ "openai": {
+  "id": "openai",
+  "models": {
+   "gpt-5": {
+    "id": "gpt-5",
+    "name": "GPT-5",
+    "description": "Original GPT-5 workhorse for reasoning, coding, writing, and tool workflows",
+    "family": "gpt",
+    "attachment": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "effort",
+      "values": [
+       "minimal",
+       "low",
+       "medium",
+       "high"
+      ]
+     }
+    ],
+    "tool_call": true,
+    "structured_output": true,
+    "temperature": false,
+    "knowledge": "2024-09-30",
+    "release_date": "2025-08-07",
+    "last_updated": "2025-08-07",
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": false,
+    "limit": {
+     "context": 400000,
+     "input": 272000,
+     "output": 128000
+    },
+    "cost": {
+     "input": 1.25,
+     "output": 10,
+     "cache_read": 0.125
+    }
+   },
+   "gpt-3.5-turbo": {
+    "id": "gpt-3.5-turbo",
+    "name": "GPT-3.5-turbo",
+    "description": "Compact GPT model for low-latency assistance and high-volume workloads",
+    "family": "gpt",
+    "attachment": false,
+    "reasoning": false,
+    "tool_call": false,
+    "structured_output": false,
+    "temperature": true,
+    "knowledge": "2021-09-01",
+    "release_date": "2023-03-01",
+    "last_updated": "2023-11-06",
+    "modalities": {
+     "input": [
+      "text"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": false,
+    "limit": {
+     "context": 16385,
+     "output": 4096
+    },
+    "status": "deprecated",
+    "cost": {
+     "input": 0.5,
+     "output": 1.5,
+     "cache_read": 0
+    }
+   },
+   "broken": {
+    "id": "broken",
+    "cost": {
+     "input": -1,
+     "output": 1
+    }
+   },
+   "gpt-5.5": {
+    "id": "gpt-5.5",
+    "name": "GPT-5.5",
+    "description": "Default frontier GPT for coding, computer use, research, and knowledge work",
+    "family": "gpt",
+    "attachment": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "effort",
+      "values": [
+       "none",
+       "low",
+       "medium",
+       "high",
+       "xhigh"
+      ]
+     }
+    ],
+    "tool_call": true,
+    "structured_output": true,
+    "temperature": false,
+    "knowledge": "2025-12-01",
+    "release_date": "2026-04-23",
+    "last_updated": "2026-04-23",
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": false,
+    "limit": {
+     "context": 1050000,
+     "input": 922000,
+     "output": 128000
+    },
+    "experimental": {
+     "modes": {
+      "fast": {
+       "cost": {
+        "input": 12.5,
+        "output": 75,
+        "cache_read": 1.25
+       },
+       "provider": {
+        "body": {
+         "service_tier": "priority"
+        }
+       }
+      }
+     }
+    },
+    "cost": {
+     "input": 5,
+     "output": 30,
+     "cache_read": 0.5,
+     "tiers": [
+      {
+       "input": 10,
+       "output": 45,
+       "cache_read": 1,
+       "tier": {
+        "type": "context",
+        "size": 272000
+       }
+      }
+     ],
+     "context_over_200k": {
+      "input": 10,
+      "output": 45,
+      "cache_read": 1
+     }
+    }
+   }
+  }
+ },
+ "unmapped": {
+  "id": "unmapped",
+  "models": {
+   "x": {
+    "id": "x",
+    "name": "X"
+   }
+  }
+ }
+}

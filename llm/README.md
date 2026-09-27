@@ -4,10 +4,12 @@ One portable Java API over LLM providers and gateways — the architecture of
 [`docs/proposals/final-architecture.md`](../docs/proposals/final-architecture.md), built as one Gradle module and one
 JPMS module (`net.ai.gate`).
 
-**Status: architectural baseline.** The facade, value types, SPIs, configuration, execution core, auth chain,
-catalog, response cache, events and testing kit are implemented and verified offline against a scripted provider and
-small transport fixtures. Vendor wire protocols and OAuth flows are explicit stubs (they throw
-`UnsupportedOperationException` naming their roadmap slice); their mapping is documented in place.
+**Status: working transport.** The facade, value types, SPIs, configuration, execution core, auth chain, catalog,
+response cache, events and testing kit, the four vendor wire protocols (OpenAI Responses and Chat Completions,
+Anthropic Messages, Gemini `generateContent`), OAuth flows including the ChatGPT subscription (Codex), generated
+images and audio, the models.dev feed, Gemini cached contents and custom TLS are implemented and verified offline
+against scripted endpoints and an in-process OAuth issuer; `./gradlew liveTest` runs opt-in smoke tests against the
+real endpoints.
 
 ```java
 var fake = FakeProvider.create().reply("Records are transparent carriers of immutable data.");
@@ -19,7 +21,32 @@ try (Llm llm = Llm.builder().provider(fake.provider()).environment(Environment.n
 ```
 
 With a real provider the shape is the same — `Llm.create()` discovers the bundled presets and reads keys from the
-environment — but the vendor codecs are still stubs, so such a call ends with `UnsupportedOperationException`.
+environment:
+
+```java
+try (Llm llm = Llm.create()) {                                   // ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY…
+    var reply = llm.complete(llm.model("anthropic", "claude-sonnet-4-6"), "Explain Java records in one sentence.");
+    System.out.println(reply.text());
+}
+```
+
+### ChatGPT subscription (Codex)
+
+A ChatGPT Plus/Pro subscription can call the Codex models without an API key. Sign in once — in the browser (the
+callback lands on `127.0.0.1:1455`) or with a device code — and keep the login in a durable store:
+
+```java
+try (Llm llm = Llm.builder().discoverProviders().credentials(CredentialStore.file(Path.of("credentials.json"))).build()) {
+    llm.auth().login("openai-codex", AuthType.OAUTH, AuthInteraction.console());   // once; refreshed automatically
+    var reply = llm.complete(llm.model("openai-codex", "gpt-5.5"), "Explain Java records in one sentence.");
+}
+```
+
+**This is not an official API for third-party clients.** The preset (`OpenAi.codex()`) follows the Codex CLI: the
+ChatGPT backend at `https://chatgpt.com/backend-api/codex`, a streaming-only Responses dialect, the account id from
+the access token as `chatgpt-account-id`. OpenAI may change or restrict any of it; exhausted plan limits fail with
+`RateLimitedException` (`quota_exhausted`). Claude Pro/Max subscriptions are deliberately not supported — Anthropic
+limits them to its own applications; use an API key.
 
 ## Build
 
@@ -27,6 +54,8 @@ JDK 26 and Gradle 9.7 (wrapper included; a missing JDK 26 is provisioned by the 
 
 ```bash
 ./gradlew build
+./gradlew liveTest            # opt-in, billable: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, AI_GATE_CREDENTIALS
+./gradlew updateModelCatalog  # network: regenerates models.json from models.dev
 ```
 
 `build` compiles with `-Xlint:all -Werror`, runs the Java and Kotlin tests (JUnit 6, ArchUnit), compiles and runs an
@@ -90,10 +119,11 @@ rely on the named module and are verified on both the module path and the class 
 | Catalog | Custom beats fresh, newest non-absent wins, prices merge component by component; live listings run with each view's credentials and availability is per view; snapshots survive restarts |
 | Diagnostics | `preview()` never sends; `toCurl()` quotes every literal and leaves only credential placeholders expandable; `describe()` redacts; error bodies are bounded; the connection test is staged, non-billable and reports unverifiable credentials as `NOT_SUPPORTED` |
 | Hand-off | Foreign reasoning becomes `<thinking>` text or is dropped, signatures never cross, tool-call ids are normalized without collisions and results follow, cache breakpoints are remapped past dropped turns |
-| Portability | `Model`, `Conversation` and `ChatOptions` have canonical JSON forms; `ProvidersConfig` states only differences from presets, has no credential field and rejects what it cannot represent |
+| Portability | `Model`, `Conversation` and `ChatOptions` have canonical JSON forms; `ProvidersConfig` states only differences from presets — compat flags included — has no credential field and rejects what it cannot represent |
+| Adaptation | Models that reject sampling parameters (catalog, or OpenAI reasoning models while reasoning) get none and a warning; forced tool choice becomes `auto` where Claude cannot force a tool; foreign generated media is omitted (audio as its transcript) |
 | Boundaries | ArchUnit rules above; an external consumer compiles and runs on the module path and the class path; internals are not exported |
 
-## Implemented vs. stubbed
+## Implemented
 
 | Area | State |
 |---|---|
@@ -104,18 +134,31 @@ rely on the named module and are verified on both the module path and the class 
 | Auth chain with sources, memory/file/scoped stores, API-key login, console and redirect interactions | implemented |
 | Catalog merge, feeds, live listings (`GET models`), background refresh, snapshot file | implemented |
 | Canonical JSON forms of models, conversations and options; `ProvidersConfig` with `defaults` | implemented |
-| `OpenAi.RESPONSES`, `OpenAi.CHAT_COMPLETIONS`, `Anthropic.MESSAGES`, `Gemini.GENERATE_CONTENT` codecs | **stub** — mapping in class docs |
-| `OAuthAuth.standard` flows (PKCE loopback / redirect, device code, refresh, revocation) | **stub** |
-| models.dev feed adapter, `Gemini.CACHES`, custom TLS, `compat` in `ProvidersConfig` | **stub** — rejected explicitly, never silently dropped |
+| `OpenAi.RESPONSES` (stateless: encrypted reasoning replay, citations, hosted tools), `OpenAi.CHAT_COMPLETIONS` (compat flags: reasoning formats, max-tokens field, developer role, reasoning replay, Anthropic-style cache markers, session headers) | implemented |
+| `Anthropic.MESSAGES`: adaptive or budget thinking, signed/redacted thinking replay, ≤ 4 cache markers with 1 h TTL, hosted tools with their betas, structured output | implemented |
+| `Gemini.GENERATE_CONTENT`: thinking level or budget, thought signatures on any part, function calls/responses, JSON-schema output, `cachedContent` | implemented |
+| `OAuthAuth.standard`: PKCE S256 via loopback, pasted code or web redirect; device code (RFC 8628 and OpenAI's dialect); refresh rotation; revocation; extra authorization parameters; the account from an access-token claim, sent as a header | implemented |
+| `OpenAi.codex()`: ChatGPT Plus/Pro subscription through the Codex backend — browser or device login, `OpenAiResponsesCompat` dialect (streaming only, required instructions, no `max_output_tokens`, session headers), `complete()` collected from the event stream, plan limits as `quota_exhausted` (not retried), Codex models in the catalog | implemented |
+| Generated media: Gemini `inlineData` images and audio, Responses `image_generation_call` (replayed as its item), Chat Completions `message.audio` / `delta.audio` (replayed as the transcript) | implemented |
+| Anthropic citations (`Content.Citation` per text block, `citations_delta` in streams); forced `tool_choice` adapted to `auto` under budget thinking and on Opus 5.5 / Fable 5.1 / Mythos 5.1 | implemented |
+| Sampling rules: `Capability.TEMPERATURE` from models.dev, OpenAI reasoning models, Claude thinking — dropped with `option_dropped`, never a failure; reply warnings logged at `INFO` | implemented |
+| Mistral tool-call ids (`OpenAiCompletionsCompat.ToolCallIdFormat.MISTRAL`: nine letters and digits, calls and results paired) | implemented |
+| `compat` in `ProvidersConfig` (per provider and per model, canonical `toJson()` / `fromJson()` of every `ApiCompat`) | implemented |
+| models.dev feed (runtime refresh) and `./gradlew updateModelCatalog` (regenerates `models.json`), `Gemini.CACHES`, custom TLS (`HttpOptions.sslContext()`) | implemented |
+| Confidential OAuth clients and the client-credentials grant | not supported — rejected explicitly, never silently dropped |
 
-`FakeProvider`'s codec (`testing/FakeWireApi`) is a complete, small `WireApi` and the reference for implementing the
-real ones: a codec is pure — it maps `ApiRequest` to an `HttpCall` and replies to `AssistantMessage` / `ChatEvent`s —
-while the core owns I/O, credentials, retries, deadlines, cancellation, redaction and events.
+A codec is pure — it maps `ApiRequest` to an `HttpCall` and replies or stream frames to `AssistantMessage` /
+`ChatEvent`s — while the core owns I/O, credentials, retries, deadlines, cancellation, redaction and events. Shared
+mapping steps live in `spi.protocol.Codecs`; `testing/FakeWireApi` remains the smallest complete example.
 
-## Known limits of this baseline
+## Known limits
 
-- The bundled `models.json` holds illustrative entries; ids, limits and prices are not verified and not suitable for
-  billing. Preset URLs and environment-variable names need checking against provider documentation before real use.
+- `models.json` is generated from models.dev (text models of the preset providers; OpenRouter is listed live). Its
+  prices are the feed's, not an invoice; the runtime feed refreshes them unless `CatalogOptions.offline()`/`noFeeds()`.
+- Thinking formats that depend on the model generation are chosen by model id: Claude models after 4.5 think
+  adaptively, Gemini 3 and `-latest` aliases take a `thinkingLevel`; `AnthropicOptions.thinkingBudget` and
+  `GeminiOptions.thinkingBudget` force a budget.
+- OAuth supports public clients only; the loopback listener waits 5 minutes and answers only its callback path.
 - The JDK transport's connect timeout is a client-level setting taken from the runtime's default `TimeoutPolicy`;
   per-call `connect` values reach only injected transports.
 - Call context is passed explicitly (`Call`) rather than through a `ScopedValue`; the architecture's sketch of a
@@ -125,8 +168,18 @@ while the core owns I/O, credentials, retries, deadlines, cancellation, redactio
 - Provider file references (`Content.fileRef`) carry only the provider's file id; binding them to an account is left
   to the vendor upload APIs of the next slice.
 
-## Next steps (roadmap §19)
+- The Codex backend is reached over SSE only (the Codex CLI's WebSocket transport is not used); the login needs
+  port 1455 on the loopback free. An existing Codex CLI login (`~/.codex/auth.json`) is not imported: both clients
+  would rotate one refresh token and sign each other out.
+- Generated media is decoded, but requesting it has no portable option: use the hosted tool
+  `OpenAiTools.imageGeneration()`, Gemini's `responseModalities` / `speechConfig` or Chat Completions' `modalities` /
+  `audio` through `ChatOptions.payload(…)`. Streamed Chat Completions audio is `pcm16`; a whole reply's format is the
+  one it names, else `wav`. Gemini streams audio in several parts.
+- Gemini 3 accepts media inside `functionResponse.parts`; tool-result media is still sent as sibling parts.
+- OpenRouter's `reasoning_details` are not replayed; Groq and xAI accept fewer effort values than OpenAI — the
+  catalog's reasoning levels clamp them.
 
-1. Chat Completions and Anthropic Messages codecs with golden fixtures and hand-off tests between them.
-2. OAuth flows against a local fake authorization server; OpenRouter preset login.
-3. Responses and Gemini codecs, the models.dev feed, catalog regeneration task.
+## Next steps
+
+1. Run `./gradlew liveTest` with real keys and a Codex login; fix what the live endpoints disagree with.
+2. Provider upload APIs (files) with account binding of `Content.fileRef`.

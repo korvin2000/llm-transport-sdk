@@ -1,4 +1,4 @@
-/// Internal: the standard OAuth strategy (flows are the next roadmap slice).
+/// Internal: the standard OAuth strategy — PKCE, device code, refresh and revocation — and its loopback listener.
 @NullMarked
 package net.ai.gate.internal.auth.oauth;
 

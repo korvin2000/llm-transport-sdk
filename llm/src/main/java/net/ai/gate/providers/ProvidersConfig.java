@@ -6,7 +6,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Optional;
+import java.util.Map;
 import java.util.Set;
 
 import net.ai.gate.Provider;
@@ -19,25 +19,31 @@ import net.ai.gate.json.JsonValue;
 import net.ai.gate.model.Model;
 import net.ai.gate.spi.protocol.ApiCompat;
 import net.ai.gate.vendors.anthropic.Anthropic;
+import net.ai.gate.vendors.anthropic.AnthropicCompat;
 import net.ai.gate.vendors.openai.OpenAiCompatible;
+import net.ai.gate.vendors.openai.OpenAiCompletionsCompat;
+import net.ai.gate.vendors.openai.OpenAiResponsesCompat;
 import org.jspecify.annotations.Nullable;
 
 /// Versioned, secret-free provider configuration (`ai-gate.providers/1`). Each entry names a preset or a template
 /// (`openai-compatible`, `anthropic-compatible`, which require `baseUrl`) and states only differences: `id`, `name`,
-/// `baseUrl`, `headers`, `models`, `defaults`. There is no credential field — credentials live in a
+/// `baseUrl`, `headers`, `models`, `defaults`, `compat`. There is no credential field — credentials live in a
 /// `CredentialStore` under the provider id. `providers` must be an array of objects; duplicate ids fail. Unknown
 /// presets fail naming the known ones; unknown fields fail unless prefixed `x-`; no classes are loaded by name.
+///
+/// `compat` holds the flags that differ from the preset's, in the canonical form of the compat type of the default
+/// API (`openai-completions`: `OpenAiCompletionsCompat`, `openai-responses`: `OpenAiResponsesCompat`,
+/// `anthropic-messages`: `AnthropicCompat`); a model entry may carry its own for its API. Flags merge onto the preset's
+/// field by field, so a configuration can set flags but not unset one a preset sets.
 ///
 /// ```json
 /// { "schema": "ai-gate.providers/1",
 ///   "providers": [ { "id": "corp-gw", "preset": "openai-compatible", "baseUrl": "https://llm-gw.corp.example/v1",
 ///                    "headers": { "X-Tenant": "team-42" }, "models": [ { "id": "gpt-5.1", "contextWindow": 400000 } ],
-///                    "defaults": { "schema": "ai-gate.options/1", "cacheRetention": "none" } },
+///                    "defaults": { "schema": "ai-gate.options/1", "cacheRetention": "none" },
+///                    "compat": { "reasoningFormat": "qwen", "developerRole": false } },
 ///                  { "id": "work-anthropic", "preset": "anthropic" } ] }
 /// ```
-///
-/// **Pending (roadmap slice 1):** `compat` flags in the format — a provider whose `compat()` differs from its
-/// preset's or template's cannot yet be written, and a `compat` member fails on read.
 public final class ProvidersConfig {
     public static final String SCHEMA = "ai-gate.providers/1";
 
@@ -84,21 +90,40 @@ public final class ProvidersConfig {
     private static Provider read(JsonObject entry, List<Provider> presets) {
         for (var field : entry.members().keySet())
             if (!FIELDS.contains(field) && !field.startsWith("x-")) throw new IllegalArgumentException("unknown field '" + field + "'");
-        if (entry.get("compat").isPresent()) throw new IllegalArgumentException("'compat' is not supported in " + SCHEMA + " yet");
         var preset = text(entry, "preset");
         if (preset == null) throw new IllegalArgumentException("'preset' is required");
         var explicitId = text(entry, "id");
         var id = explicitId != null ? explicitId : preset;
         var baseUrl = text(entry, "baseUrl");
-        var builder = template(preset, id, baseUrl, presets).toBuilder().id(id);
+        var base = template(preset, id, baseUrl, presets);
+        var api = base.defaultApi().id();
+        var builder = base.toBuilder().id(id);
         if (baseUrl != null) builder.baseUrl(URI.create(baseUrl));
         var name = text(entry, "name");
         if (name != null) builder.name(name);
         entry.object("headers").members().forEach((k, v) -> builder.header(k, ((JsonString) v).value()));
         if (entry.get("models").orElse(null) instanceof JsonArray models)
-            for (var model : models.values()) builder.model(Model.fromJson(((JsonObject) model).with("provider", id)));
+            for (var value : models.values()) {
+                var json = (JsonObject) value;
+                var model = Model.fromJson(json.without("compat").with("provider", id));
+                if (json.get("compat").orElse(null) instanceof JsonValue flags)
+                    model = model.toBuilder().compat(compat(model.api().orElse(api), flags)).build();
+                builder.model(model);
+            }
         if (entry.get("defaults").orElse(null) instanceof JsonObject defaults) builder.defaults(ChatOptions.fromJson(defaults));
+        if (entry.get("compat").orElse(null) instanceof JsonValue flags) builder.compat(compat(api, flags));
         return builder.build();
+    }
+
+    /// The compat type of an API — a plain switch, no registry.
+    private static ApiCompat compat(String api, JsonValue flags) {
+        if (!(flags instanceof JsonObject json)) throw new IllegalArgumentException("'compat' must be an object");
+        return switch (api) {
+            case "openai-completions" -> OpenAiCompletionsCompat.fromJson(json);
+            case "openai-responses" -> OpenAiResponsesCompat.fromJson(json);
+            case "anthropic-messages" -> AnthropicCompat.fromJson(json);
+            default -> throw new IllegalArgumentException("'compat' is not defined for the API " + api);
+        };
     }
 
     private static Provider template(String preset, String id, @Nullable String baseUrl, List<Provider> presets) {
@@ -111,8 +136,8 @@ public final class ProvidersConfig {
                         + presets.stream().map(p -> p.preset().orElse(p.id())).toList() + " and templates " + TEMPLATES));
     }
 
-    /// @throws IllegalArgumentException naming `provider` when its `compat()` differs from its preset's or
-    /// template's and so cannot yet be written (`compat` is pending, see the class Javadoc)
+    /// @throws IllegalArgumentException naming `provider` when it cannot be read back as it is: no preset, or compat
+    /// flags of another type than its API reads, or unsetting a flag of the preset
     private static JsonObject write(Provider provider) {
         var preset = provider.preset().orElseThrow(() -> new IllegalArgumentException(
                 "Provider '" + provider.id() + "' is not derived from a preset or template and cannot be written"));
@@ -123,9 +148,8 @@ public final class ProvidersConfig {
         // (baseUrl must always be written for a template, since reading one back requires it).
         var comparisonBase = base != null ? base
                 : TEMPLATES.contains(preset) ? template(preset, provider.id(), provider.baseUrl().toString(), List.of()) : null;
-        var baseCompat = comparisonBase == null ? Optional.<ApiCompat>empty() : comparisonBase.compat();
-        if (!provider.compat().equals(baseCompat)) throw new IllegalArgumentException("Provider '" + provider.id()
-                + "' has compat flags that differ from its preset or template and cannot yet be written (" + SCHEMA + ")");
+        var api = (comparisonBase != null ? comparisonBase : provider).defaultApi().id();
+        var compat = difference(provider.id(), provider.compat().orElse(null), comparisonBase == null ? null : comparisonBase.compat().orElse(null), api);
         var entry = new LinkedHashMap<String, JsonValue>();
         entry.put("id", Json.valueOf(provider.id()));
         entry.put("preset", Json.valueOf(preset));
@@ -134,13 +158,33 @@ public final class ProvidersConfig {
         var headers = new LinkedHashMap<String, String>(provider.headers());
         if (base != null) base.headers().forEach(headers::remove);
         if (!headers.isEmpty()) entry.put("headers", Json.valueOf(headers));
-        var models = provider.models().stream().filter(m -> m.source() == Model.Source.CUSTOM)
-                .map(m -> (JsonValue) m.toJson().without("provider").without("source")).toList();
+        var models = provider.models().stream().filter(m -> m.source() == Model.Source.CUSTOM).map(m -> {
+            var json = m.toJson().without("provider").without("source");
+            var flags = difference(provider.id() + "' model '" + m.id(), m.compat().orElse(null), null, m.api().orElse(api));
+            return (JsonValue) (flags == null ? json : json.with("compat", flags));
+        }).toList();
         if (!models.isEmpty()) entry.put("models", JsonArray.of(models));
         // ChatOptions has no equals(); compare the canonical JSON form instead of object identity.
         var baseDefaults = comparisonBase == null ? ChatOptions.none() : comparisonBase.defaults();
         if (!provider.defaults().toJson().equals(baseDefaults.toJson())) entry.put("defaults", provider.defaults().toJson());
+        if (compat != null) entry.put("compat", compat);
         return JsonObject.of(entry);
+    }
+
+    /// The flags of `compat` that `base` does not already set to the same value; `null` when there are none.
+    private static @Nullable JsonObject difference(String owner, @Nullable ApiCompat compat, @Nullable ApiCompat base, String api) {
+        var mine = compat == null ? JsonObject.of(Map.of()) : compat.toJson();
+        var theirs = base == null ? JsonObject.of(Map.of()) : base.toJson();
+        if (compat != null && !compat.api().equals(api) || base != null && compat != null && base.getClass() != compat.getClass())
+            throw new IllegalArgumentException("Provider '" + owner + "' has compat flags for " + (compat == null ? "?" : compat.api())
+                    + ", but its API " + api + " reads other ones");
+        for (var name : theirs.members().keySet())
+            if (!mine.members().containsKey(name))
+                throw new IllegalArgumentException("Provider '" + owner + "' unsets the compat flag '" + name + "' of its preset, which "
+                        + SCHEMA + " cannot express");
+        var changed = new LinkedHashMap<String, JsonValue>(mine.members());
+        changed.entrySet().removeIf(e -> e.getValue().equals(theirs.members().get(e.getKey())));
+        return changed.isEmpty() ? null : JsonObject.of(changed);
     }
 
     private static @Nullable String text(JsonObject object, String name) {

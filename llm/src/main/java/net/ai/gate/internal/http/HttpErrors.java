@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import net.ai.gate.chat.AssistantMessage;
@@ -34,6 +35,8 @@ public final class HttpErrors {
     private static final Pattern OVERFLOW = Pattern.compile(
             "context.{0,20}(length|window|limit)|maximum context|too many (input )?tokens|prompt is too long|exceeds? the (max|context)",
             Pattern.CASE_INSENSITIVE);
+    /// Provider codes of an exhausted budget or plan (OpenAI, the ChatGPT Codex backend): not a transient rate limit.
+    private static final Set<String> QUOTA = Set.of("insufficient_quota", "usage_limit_reached", "usage_not_included");
 
     private HttpErrors() { }
 
@@ -59,8 +62,9 @@ public final class HttpErrors {
             case 503, 529 -> ErrorCode.OVERLOADED;
             default -> status >= 500 ? ErrorCode.SERVER_ERROR : ErrorCode.INVALID_REQUEST;
         };
-        return LlmException.Details.builder(code, "HTTP " + status + ": " + message).httpStatus(status)
-                .providerCode(first(error, "type", error == null ? null : string(error, "code")))
+        var providerCode = first(error, "type", error == null ? null : string(error, "code"));
+        if (QUOTA.contains(String.valueOf(providerCode))) code = ErrorCode.QUOTA_EXHAUSTED;
+        return LlmException.Details.builder(code, "HTTP " + status + ": " + message).httpStatus(status).providerCode(providerCode)
                 .providerRequestId(reply.header("x-request-id").or(() -> reply.header("request-id")).orElse(null))
                 .retryAfter(retryAfter(reply)).outcomeUnknown(status == 504).errorBody(body).build();
     }

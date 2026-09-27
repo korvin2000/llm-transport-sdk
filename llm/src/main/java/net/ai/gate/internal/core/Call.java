@@ -180,7 +180,8 @@ final class Call {
                 rejected = auth;   // one forced refresh of exactly this token; later attempts resolve normally
                 continue;
             }
-            boolean retryable = retry.retryOnStatus().contains(reply.status()) && !details.outcomeUnknown();
+            boolean retryable = retry.retryOnStatus().contains(reply.status()) && !details.outcomeUnknown()
+                    && !details.code().equals(ErrorCode.QUOTA_EXHAUSTED);   // waiting does not refill a quota
             var delay = retryable && replayable ? backoff(attempt + 1, details.retryAfter().orElse(null)) : null;
             if (delay == null) throw HttpErrors.exception(details.toBuilder().retryable(retryable).build(), null);
             pause(details.code(), attempt + 1, delay);

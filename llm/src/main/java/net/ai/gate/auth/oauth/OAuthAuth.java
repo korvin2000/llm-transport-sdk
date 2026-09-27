@@ -20,6 +20,9 @@ public interface OAuthAuth {
     /// No I/O.
     ResolvedAuth toAuth(OAuthCredential credential);
 
+    /// Network: revokes the tokens at the issuer where it offers revocation; a no-op otherwise.
+    default void revoke(OAuthCredential credential) { }
+
     /// PKCE S256 with a loopback or external redirect, device code, client credentials — by the config's grants.
     static OAuthAuth standard(OAuthConfig config) { return new StandardOAuth(config); }
 }

@@ -13,6 +13,7 @@ public final class Providers {
     private Providers() { }
 
     public static Provider openai() { return OpenAi.provider(); }
+    public static Provider openAiCodex() { return OpenAi.codex(); }
     public static Provider anthropic() { return Anthropic.provider(); }
     public static Provider google() { return Gemini.provider(); }
     public static Provider openRouter() { return OpenAiCompatible.openRouter(); }
@@ -28,7 +29,7 @@ public final class Providers {
     /// Every preset, for "connect provider" screens. Templates that need a base URL (`openai-compatible`,
     /// `anthropic-compatible`) are created with `OpenAiCompatible.custom(…)` and `Anthropic.compatible(…)`.
     public static List<Provider> presets() {
-        return List.of(openai(), anthropic(), google(), openRouter(), deepSeek(), xai(), qwen(), mistral(), groq(), ollama(),
+        return List.of(openai(), openAiCodex(), anthropic(), google(), openRouter(), deepSeek(), xai(), qwen(), mistral(), groq(), ollama(),
                 lmStudio(), vllm());
     }
 }

@@ -24,7 +24,7 @@ public final class OpenAiCompatible {
     /// Keys from `OPENROUTER_API_KEY`, or an OAuth PKCE login that issues a key.
     public static Provider openRouter() {
         var oauth = OAuthConfig.builder("ai-gate").authorizationEndpoint(URI.create("https://openrouter.ai/auth"))
-                .tokenEndpoint(URI.create("https://openrouter.ai/api/v1/auth/keys"))
+                .tokenEndpoint(URI.create("https://openrouter.ai/api/v1/auth/keys")).redirectParameter("callback_url").jsonTokenRequests()
                 .tokenResponseMapper(json -> OAuthCredential.builder(Secret.of(json.string("key")), "https://openrouter.ai", "ai-gate").build())
                 .build();
         return preset("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "https://openrouter.ai/keys")
@@ -52,9 +52,11 @@ public final class OpenAiCompatible {
                 .build();
     }
 
+    /// Tool-call ids are exactly nine letters and digits.
     public static Provider mistral() {
         return preset("mistral", "Mistral", "https://api.mistral.ai/v1", "MISTRAL_API_KEY", "https://console.mistral.ai/api-keys")
-                .compat(OpenAiCompletionsCompat.builder().maxTokensField("max_tokens").developerRole(false).strictTools(false).build())
+                .compat(OpenAiCompletionsCompat.builder().maxTokensField("max_tokens").developerRole(false).strictTools(false)
+                        .toolCallIdFormat(OpenAiCompletionsCompat.ToolCallIdFormat.MISTRAL).build())
                 .build();
     }
 

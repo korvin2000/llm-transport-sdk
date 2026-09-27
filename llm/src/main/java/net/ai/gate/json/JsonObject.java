@@ -2,8 +2,10 @@ package net.ai.gate.json;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import org.jspecify.annotations.Nullable;
 
@@ -31,6 +33,28 @@ public final class JsonObject implements JsonValue {
 
     /// The object member `name`, or an empty object when absent or of another type.
     public JsonObject object(String name) { return members.get(name) instanceof JsonObject o ? o : EMPTY; }
+
+    /// The array member `name` as a list, or an empty list when absent or of another type.
+    public List<JsonValue> array(String name) { return members.get(name) instanceof JsonArray a ? a.values() : List.of(); }
+
+    /// The objects of the array member `name`; other elements are skipped.
+    public List<JsonObject> objects(String name) {
+        return array(name).stream().filter(JsonObject.class::isInstance).map(JsonObject.class::cast).toList();
+    }
+
+    /// The string member `name`, or empty when absent or of another type.
+    public Optional<String> optString(String name) {
+        return members.get(name) instanceof JsonString s ? Optional.of(s.value()) : Optional.empty();
+    }
+
+    /// The integral number member `name`, or empty when absent, of another type or not a `long`.
+    public OptionalLong optLong(String name) {
+        if (!(members.get(name) instanceof JsonNumber n)) return OptionalLong.empty();
+        try { return OptionalLong.of(n.longValue()); } catch (ArithmeticException e) { return OptionalLong.empty(); }
+    }
+
+    /// The boolean member `name`; `false` when absent or of another type.
+    public boolean bool(String name) { return members.get(name) instanceof JsonBoolean b && b.value(); }
 
     public Map<String, JsonValue> members() { return members; }
 

@@ -129,7 +129,7 @@ final class Accumulator {
             case ToolResult r -> r.content().stream().mapToLong(Accumulator::sizeOf).sum();
             case Content.Refusal r -> r.text().length();
             case Content.Unknown u -> u.raw().toJson().length();
-            case Content.Image i -> i.source() instanceof Content.Source.Inline inline ? inline.data().length : 64;
+            case Content.Image i -> (i.source() instanceof Content.Source.Inline inline ? inline.data().length : 64) + i.providerData().toJson().length();
             case Content.Document d -> d.source() instanceof Content.Source.Inline inline ? inline.data().length : 64;
             case Content.Audio a -> a.data().length;
         };

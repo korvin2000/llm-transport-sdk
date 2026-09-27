@@ -97,9 +97,9 @@ class AuthTest {
     }
 
     @Test
-    void oauthFlowsArePendingButConfiguredAsData() {
+    void openRouterOffersKeysAndOAuth() {
         try (var llm = Llm.builder().provider(Providers.openRouter()).environment(Environment.none()).catalog(c -> c.offline()).build()) {
-            assertThrows(UnsupportedOperationException.class, () -> llm.auth().login("openrouter", AuthType.OAUTH, AuthInteraction.console()));
+            assertEquals(List.of(AuthType.API_KEY, AuthType.OAUTH), llm.auth().methods("openrouter"));
         }
     }
 

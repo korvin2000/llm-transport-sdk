@@ -19,6 +19,9 @@ public final class OpenAiTools {
 
     public static ProviderTool codeInterpreter() { return tool("code_interpreter", Json.object("type", "code_interpreter")); }
 
+    /// Generated images arrive as `Content.Image` parts.
+    public static ProviderTool imageGeneration() { return tool("image_generation", Json.object("type", "image_generation")); }
+
     public static ProviderTool remoteMcp(String label, URI serverUrl) {
         return tool("mcp", Json.object("type", "mcp", "server_label", label, "server_url", serverUrl));
     }

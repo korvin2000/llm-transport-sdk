@@ -4,11 +4,13 @@ import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
+import java.util.stream.Collectors;
 
 import net.ai.gate.Provider;
 import net.ai.gate.auth.CredentialStore;
@@ -93,9 +95,14 @@ final class Engine {
             var cached = lookup(cache);
             if (cached != null) {
                 call.firstOutput();
-                return finish(call, p, decode(p, cached.reply()), true);
+                return cached.body() == null ? new DefaultChatStream(this, call, p, null, cached.frames().iterator(), null, true, null).result()
+                        : finish(call, p, decode(p, cached.reply()), true);
             }
-            try (var reply = call.send(p.call(), true)) {
+            var sent = call.send(p.call(), true);
+            // endpoints that only stream (the ChatGPT Codex backend) answer with events: read them as the stream would
+            if (sent.header("content-type").orElse("").toLowerCase(Locale.ROOT).startsWith("text/event-stream"))
+                return live(p, call, sent, cache).result();
+            try (var reply = sent) {
                 var message = call.read(reply, () -> decode(p, reply));
                 call.firstOutput();
                 var result = finish(call, p, message, false);
@@ -115,16 +122,19 @@ final class Engine {
             call.checkActive();
             var cached = lookup(cache);
             if (cached != null) return new DefaultChatStream(this, call, p, null, cached.frames().iterator(), null, true, null);
-            var reply = call.send(p.call(), true);
-            try {
-                var reader = new FrameReader(reply.body(), p.api().streamFormat());
-                return new DefaultChatStream(this, call, p, reply, reader, reader, false, cache);
-            } catch (RuntimeException e) {
-                reply.close();
-                throw e;
-            }
+            return live(p, call, call.send(p.call(), true), cache);
         } catch (RuntimeException e) {
             throw call.fail(e, null);
+        }
+    }
+
+    private DefaultChatStream live(Prepared p, Call call, HttpReply reply, @Nullable CachePlan cache) {
+        try {
+            var reader = new FrameReader(reply.body(), p.api().streamFormat());
+            return new DefaultChatStream(this, call, p, reply, reader, reader, false, cache);
+        } catch (RuntimeException e) {
+            reply.close();
+            throw e;
         }
     }
 
@@ -156,6 +166,8 @@ final class Engine {
         var cost = p.model().prices().flatMap(prices -> prices.cost(usage)).orElse(null);
         var warnings = new LinkedHashSet<Warning>(p.notes().warnings());
         warnings.addAll(message.warnings());
+        if (!warnings.isEmpty()) LOG.log(System.Logger.Level.INFO, () -> call.requestId + " " + p.model().ref() + ": "
+                + warnings.stream().map(w -> w.code() + " — " + w.message()).collect(Collectors.joining("; ")));
         var reply = message.toBuilder().usage(usage.toBuilder().cost(cost).spent(!fromCache).build()).warnings(new ArrayList<>(warnings))
                 .info(ResponseInfo.builder(call.requestId, p.provider().id()).providerRequestId(call.providerRequestId())
                         .attempts(fromCache ? 0 : call.attempts()).latency(call.elapsed()).timeToFirstOutput(call.timeToFirstOutput())

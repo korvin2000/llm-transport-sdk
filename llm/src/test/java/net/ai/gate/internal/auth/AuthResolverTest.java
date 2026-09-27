@@ -175,13 +175,14 @@ class AuthResolverTest {
     }
 
     @Test
-    void theStandardOAuthStrategyPresentsTokensAndDefersFlows() {
+    void theStandardOAuthStrategyPresentsTokens() {
         var config = OAuthConfig.builder("client").authorizationEndpoint(URI.create("https://issuer.example/auth"))
                 .tokenEndpoint(URI.create("https://issuer.example/token")).build();
         var standard = OAuthAuth.standard(config);
         var credential = token("access-1").toBuilder().expiresAt(Instant.parse("2030-01-01T00:00:00Z")).build();
         assertEquals("Bearer access-1", standard.toAuth(credential).headers().get("Authorization"));
-        assertThrows(UnsupportedOperationException.class, () -> standard.refresh(credential));
+        var error = assertThrows(AuthenticationException.class, () -> standard.refresh(credential.toBuilder().refresh(null).build()));
+        assertEquals(ErrorCode.REFRESH_FAILED, error.code());
         assertThrows(IllegalArgumentException.class, () -> OAuthConfig.builder("c").authorizationEndpoint(URI.create("http://issuer.example/auth")));
         assertEquals(HttpCall.get("models").uri().toString(), "models");
         assertTrue(HttpReply.of(200, Map.of(), new byte[0]).successful());

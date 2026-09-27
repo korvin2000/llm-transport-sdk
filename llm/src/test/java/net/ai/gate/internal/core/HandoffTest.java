@@ -122,4 +122,15 @@ class HandoffTest {
         assertEquals(2, adapted.messages().size());
         assertEquals(List.of(Content.text("I can't.")), ((AssistantMessage) adapted.messages().get(1)).content());
     }
+
+    @Test
+    void foreignGeneratedMediaNeverReachesAnotherModel() {
+        var reply = fromGpt(Content.text("Here."), Content.image(new byte[] {1}, "image/png"), Content.Audio.of(new byte[] {2}, "wav", "Hello!"),
+                Content.Audio.of(new byte[] {3}, "wav", null));
+        var notes = new Notes(false);
+        var adapted = Handoff.adapt(Conversation.of("Draw").append(reply), Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, notes);
+        assertEquals(List.of(Content.text("Here."), Content.text("Hello!")), ((AssistantMessage) adapted.messages().get(1)).content(),
+                "images are omitted, audio becomes its transcript");
+        assertTrue(notes.warnings().stream().anyMatch(w -> w.code().equals("history_adapted")));
+    }
 }

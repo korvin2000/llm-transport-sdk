@@ -1,7 +1,6 @@
 package net.ai.gate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
@@ -35,29 +34,38 @@ class CatalogTest {
         };
     }
 
+    /// The shipped entry, whatever the regenerated data says.
+    private static Model bundled() {
+        try (var llm = Llm.builder().provider(Providers.anthropic()).environment(Environment.none()).catalog(c -> c.offline()).build()) {
+            return llm.models().find(SONNET).orElseThrow();
+        }
+    }
+
     @Test
     void bundledDataFillsWhatTheHostDidNotState() {
+        var shipped = bundled();
         var anthropic = Providers.anthropic().toBuilder().model(Model.builder("anthropic", "claude-sonnet-5").contextWindow(1_000).build()).build();
         try (var llm = Llm.builder().provider(anthropic).environment(Environment.none()).catalog(c -> c.offline()).build()) {
             var model = llm.model("anthropic", "claude-sonnet-5");
             assertEquals(1_000, model.contextWindow().orElseThrow(), "host values win");
-            assertEquals(new BigDecimal("3"), model.prices().orElseThrow().inputPerMillion().orElseThrow(), "absent never overwrites");
+            assertEquals(shipped.prices(), model.prices(), "absent never overwrites");
+            assertEquals(shipped.maxOutputTokens(), model.maxOutputTokens());
             assertEquals(Model.Source.CUSTOM, model.source());
-            assertEquals("anthropic-messages", model.api().orElseThrow());
         }
     }
 
     @Test
     void newerFeedDataWinsOlderDoesNot() {
+        var shipped = bundled();
         for (var newer : List.of(true, false)) {
             var updated = Instant.parse(newer ? "2030-01-01T00:00:00Z" : "2020-01-01T00:00:00Z");
             try (var llm = Llm.builder().provider(Providers.anthropic()).environment(Environment.none())
-                    .catalog(c -> c.manualRefresh().feed(feed(updated, 99))).build()) {
+                    .catalog(c -> c.manualRefresh().feeds(List.of(feed(updated, 99)))).build()) {
                 var report = llm.models().refresh();
-                assertFalse(report.ok(), "the bundled models.dev feed is a stub and reports its failure");
+                assertTrue(report.ok(), report.toString());
                 var model = llm.models().find(SONNET).orElseThrow();
-                assertEquals(newer ? 99 : 64_000, model.maxOutputTokens().orElseThrow());
-                assertEquals(200_000, model.contextWindow().orElseThrow());
+                assertEquals(newer ? 99 : shipped.maxOutputTokens().orElseThrow(), model.maxOutputTokens().orElseThrow());
+                assertEquals(shipped.contextWindow(), model.contextWindow());
                 assertEquals(newer ? Model.Source.FEED : Model.Source.BUNDLED, model.source());
             }
         }
@@ -78,7 +86,7 @@ class CatalogTest {
     void refreshedSnapshotsSurviveRestarts(@TempDir Path directory) {
         var snapshot = directory.resolve("models.json");
         try (var llm = Llm.builder().provider(Providers.anthropic()).environment(Environment.none())
-                .catalog(c -> c.manualRefresh().feed(feed(Instant.parse("2030-01-01T00:00:00Z"), 77)).snapshotFile(snapshot)).build()) {
+                .catalog(c -> c.manualRefresh().feeds(List.of(feed(Instant.parse("2030-01-01T00:00:00Z"), 77))).snapshotFile(snapshot)).build()) {
             llm.models().refresh();
         }
         assertTrue(Files.exists(snapshot));

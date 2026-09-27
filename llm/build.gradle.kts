@@ -51,3 +51,25 @@ tasks.test {
     systemProperty("ai-gate.jar", tasks.jar.get().archiveFile.get().asFile.absolutePath)
     systemProperty("ai-gate.compileClasspath", sourceSets.main.get().compileClasspath.asPath)   // the annotation modules a consumer needs
 }
+
+tasks.register<Test>("updateModelCatalog") {                // network: regenerates the bundled catalog from models.dev
+    description = "Regenerates src/main/resources/net/ai/gate/catalog/models.json from https://models.dev/api.json"
+    group = "build"
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    useJUnitPlatform()
+    filter { includeTestsMatching("net.ai.gate.catalog.ModelsDevFeedTest.regenerateBundledCatalog") }
+    systemProperty("ai-gate.updateCatalog", file("src/main/resources/net/ai/gate/catalog/models.json").absolutePath)
+    outputs.upToDateWhen { false }
+}
+
+tasks.register<Test>("liveTest") {                          // network, billable: smoke tests against the real endpoints
+    description = "Runs LiveSmokeTest against real providers; keys come from the environment (see the test's Javadoc)"
+    group = "verification"
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    useJUnitPlatform()
+    filter { includeTestsMatching("net.ai.gate.LiveSmokeTest") }
+    systemProperty("ai-gate.live", "true")
+    outputs.upToDateWhen { false }
+}

@@ -9,6 +9,7 @@ public final class AnthropicTools {
     private AnthropicTools() { }
 
     public static ProviderTool webSearch(int maxUses) { return tool("web_search", Json.object("max_uses", maxUses)); }
+    public static ProviderTool webFetch(int maxUses) { return tool("web_fetch", Json.object("max_uses", maxUses)); }
     public static ProviderTool codeExecution() { return tool("code_execution", Json.object()); }
     public static ProviderTool bash() { return tool("bash", Json.object()); }
     public static ProviderTool textEditor() { return tool("text_editor", Json.object()); }

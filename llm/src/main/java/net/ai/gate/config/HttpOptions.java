@@ -1,9 +1,24 @@
 package net.ai.gate.config;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.ProxySelector;
+import java.net.Socket;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
+import java.security.cert.X509Certificate;
 import java.util.Optional;
+
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509ExtendedTrustManager;
+
 
 import net.ai.gate.internal.validation.Checks;
 import net.ai.gate.spi.http.HttpTransport;
@@ -42,6 +57,49 @@ public final class HttpOptions {
     public Optional<Path> clientCertificate() { return Optional.ofNullable(clientCertificate); }
     public boolean insecureSkipTlsVerification() { return insecure; }
     public Optional<String> userAgentSuffix() { return Optional.ofNullable(userAgentSuffix); }
+
+    /// The TLS context the trust store, client certificate and verification settings describe; empty for the JDK
+    /// defaults. Reads the key stores (PKCS#12 or JKS, detected from the file).
+    /// @throws UncheckedIOException when a store cannot be read
+    /// @throws IllegalStateException when a store or its password is invalid
+    public Optional<SSLContext> sslContext() {
+        if (trustStore == null && clientCertificate == null && !insecure) return Optional.empty();
+        try {
+            TrustManager[] trust = null;
+            if (insecure) trust = new TrustManager[] {TrustAll.INSTANCE};
+            else if (trustStore != null) {
+                var factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+                factory.init(KeyStore.getInstance(trustStore.toFile(), trustStorePassword));
+                trust = factory.getTrustManagers();
+            }
+            KeyManager[] keys = null;
+            if (clientCertificate != null) {
+                var factory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+                factory.init(KeyStore.getInstance(clientCertificate.toFile(), clientCertificatePassword), clientCertificatePassword);
+                keys = factory.getKeyManagers();
+            }
+            var context = SSLContext.getInstance("TLS");
+            context.init(keys, trust, null);
+            return Optional.of(context);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("Invalid TLS settings: " + e.getMessage(), e);
+        }
+    }
+
+    /// Accepts every certificate and host name — an extended manager, so the JDK adds no endpoint check.
+    private static final class TrustAll extends X509ExtendedTrustManager {
+        static final TrustAll INSTANCE = new TrustAll();
+
+        @Override public void checkClientTrusted(X509Certificate[] chain, String auth) { }
+        @Override public void checkServerTrusted(X509Certificate[] chain, String auth) { }
+        @Override public void checkClientTrusted(X509Certificate[] chain, String auth, Socket socket) { }
+        @Override public void checkServerTrusted(X509Certificate[] chain, String auth, Socket socket) { }
+        @Override public void checkClientTrusted(X509Certificate[] chain, String auth, SSLEngine engine) { }
+        @Override public void checkServerTrusted(X509Certificate[] chain, String auth, SSLEngine engine) { }
+        @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+    }
     public WireLog wireLog() { return wireLog; }
 
     /// True when a JDK transport setting other than the defaults is present.
