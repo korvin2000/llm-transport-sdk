@@ -1,0 +1,47 @@
+{
+  "schema": "ai-gate.catalog/1",
+  "generatedAt": "2026-09-27T00:00:00Z",
+  "note": "Illustrative placeholder entries for the skeleton: ids, limits and prices are not verified. updateModelCatalog regenerates this file from the metadata feed (roadmap slice 3).",
+  "models": [
+    {
+      "provider": "anthropic", "id": "claude-sonnet-5", "name": "Claude Sonnet 5", "api": "anthropic-messages",
+      "input": ["text", "image", "document"], "output": ["text"],
+      "contextWindow": 200000, "maxOutputTokens": 64000,
+      "reasoning": ["off", "low", "medium", "high", "max"],
+      "capabilities": { "streaming": "supported", "tools": "supported", "vision": "supported", "reasoning": "supported",
+                        "structured_output": "supported", "prompt_caching": "supported" },
+      "prices": { "currency": "USD", "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75 },
+      "source": "bundled", "updatedAt": "2026-09-27T00:00:00Z"
+    },
+    {
+      "provider": "openai", "id": "gpt-5.1", "name": "GPT-5.1", "api": "openai-responses",
+      "input": ["text", "image"], "output": ["text"],
+      "contextWindow": 400000, "maxOutputTokens": 128000,
+      "reasoning": ["minimal", "low", "medium", "high"],
+      "capabilities": { "streaming": "supported", "tools": "supported", "vision": "supported", "reasoning": "supported",
+                        "structured_output": "supported", "prompt_caching": "supported" },
+      "prices": { "currency": "USD", "input": 1.25, "output": 10, "cacheRead": 0.125 },
+      "source": "bundled", "updatedAt": "2026-09-27T00:00:00Z"
+    },
+    {
+      "provider": "google", "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "api": "google-generate-content",
+      "input": ["text", "image", "audio", "video", "document"], "output": ["text"],
+      "contextWindow": 1048576, "maxOutputTokens": 65536,
+      "reasoning": ["low", "medium", "high"],
+      "capabilities": { "streaming": "supported", "tools": "supported", "vision": "supported", "reasoning": "supported",
+                        "structured_output": "supported" },
+      "prices": { "currency": "USD", "input": 1.25, "output": 10, "cacheRead": 0.31,
+                  "tiers": [ { "above": 200000, "input": 2.5, "output": 15, "cacheRead": 0.625 } ] },
+      "source": "bundled", "updatedAt": "2026-09-27T00:00:00Z"
+    },
+    {
+      "provider": "deepseek", "id": "deepseek-chat", "name": "DeepSeek Chat", "api": "openai-completions",
+      "input": ["text"], "output": ["text"],
+      "contextWindow": 128000, "maxOutputTokens": 8192,
+      "capabilities": { "streaming": "supported", "tools": "supported", "vision": "unsupported", "reasoning": "unsupported",
+                        "json_mode": "supported" },
+      "prices": { "currency": "USD", "input": 0.27, "output": 1.1, "cacheRead": 0.07 },
+      "source": "bundled", "updatedAt": "2026-09-27T00:00:00Z"
+    }
+  ]
+}

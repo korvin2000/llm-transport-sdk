@@ -1,0 +1,8 @@
+.gradle/
+.kotlin/
+build/
+out/
+.idea/
+*.iml
+# the root .gitignore excludes *.jar; the wrapper jar belongs to the build
+!gradle/wrapper/gradle-wrapper.jar

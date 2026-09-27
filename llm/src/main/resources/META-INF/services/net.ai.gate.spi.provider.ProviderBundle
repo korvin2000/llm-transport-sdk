@@ -1,0 +1,4 @@
+net.ai.gate.vendors.openai.internal.OpenAiBundle
+net.ai.gate.vendors.anthropic.internal.AnthropicBundle
+net.ai.gate.vendors.google.internal.GoogleBundle
+net.ai.gate.catalog.internal.BundledCatalog
