@@ -68,6 +68,13 @@ public final class AuthResolver {
     public AuthStatus status(Provider provider, CredentialStore store) {
         var stored = read(provider, store);
         if (stored instanceof OAuthCredential c) {
+            var oauth = provider.oauthAuth().orElse(null);
+            if (oauth == null) return AuthStatus.notConfigured();
+            try {
+                oauth.toAuth(c);   // local validation: a credential for a previous configuration is not usable
+            } catch (AuthenticationException e) {
+                return AuthStatus.of(AuthStatus.State.NOT_CONFIGURED, AuthType.OAUTH, "OAuth");
+            }
             var now = clock.instant();
             var state = failed(provider, store) ? AuthStatus.State.REFRESH_FAILED
                     : c.expiresWithin(Duration.ZERO, now) && c.refresh().isEmpty() ? AuthStatus.State.EXPIRED
@@ -135,6 +142,7 @@ public final class AuthResolver {
         try {
             fresh = oauth.refresh(credential);
         } catch (RuntimeException e) {
+            if (Thread.currentThread().isInterrupted()) throw e;   // the call's deadline or cancellation, not a failed refresh
             throw new RefreshFailure(e);
         }
         if (!fresh.issuer().equals(credential.issuer()) || !fresh.clientId().equals(credential.clientId())

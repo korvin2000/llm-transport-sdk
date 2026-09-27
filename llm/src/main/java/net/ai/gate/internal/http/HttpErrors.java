@@ -36,7 +36,7 @@ public final class HttpErrors {
             "context.{0,20}(length|window|limit)|maximum context|too many (input )?tokens|prompt is too long|exceeds? the (max|context)",
             Pattern.CASE_INSENSITIVE);
     /// Provider codes of an exhausted budget or plan (OpenAI, the ChatGPT Codex backend): not a transient rate limit.
-    private static final Set<String> QUOTA = Set.of("insufficient_quota", "usage_limit_reached", "usage_not_included");
+    public static final Set<String> QUOTA = Set.of("insufficient_quota", "usage_limit_reached", "usage_not_included");
 
     private HttpErrors() { }
 
@@ -66,7 +66,7 @@ public final class HttpErrors {
         if (QUOTA.contains(String.valueOf(providerCode))) code = ErrorCode.QUOTA_EXHAUSTED;
         return LlmException.Details.builder(code, "HTTP " + status + ": " + message).httpStatus(status).providerCode(providerCode)
                 .providerRequestId(reply.header("x-request-id").or(() -> reply.header("request-id")).orElse(null))
-                .retryAfter(retryAfter(reply)).outcomeUnknown(status == 504).errorBody(body).build();
+                .retryAfter(retryAfter(reply)).outcomeUnknown(status == 500 || status == 502 || status == 504).errorBody(body).build();
     }
 
     /// The bounded body: parsed JSON when it parses and fits, else truncated text, else nothing.

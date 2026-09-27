@@ -65,6 +65,7 @@ public final class OAuthConfig {
     public Set<String> scopes() { return scopes; }
     public Set<Grant> grants() { return grants; }
     /// Maps non-standard token responses (OpenRouter's PKCE exchange returns `{"key": …}`).
+    /// The credential must name this config's client id and the authorization endpoint's origin as its issuer.
     public Optional<Function<JsonObject, OAuthCredential>> tokenResponseMapper() { return Optional.ofNullable(tokenResponseMapper); }
 
     /// The authorization-request parameter carrying the redirect: `redirect_uri`, or a dialect's own

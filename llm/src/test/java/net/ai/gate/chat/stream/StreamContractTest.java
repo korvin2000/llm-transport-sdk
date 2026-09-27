@@ -24,6 +24,7 @@ import net.ai.gate.spi.http.HttpReply;
 import net.ai.gate.testing.FakeProvider;
 import net.ai.gate.testing.Fixtures;
 import net.ai.gate.testing.RecordingListener;
+import net.ai.gate.vendors.openai.OpenAiCompatible;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -31,6 +32,38 @@ import org.junit.jupiter.api.Timeout;
 /// the partial reply and are thrown once.
 @Timeout(20)
 class StreamContractTest {
+    @Test
+    void aWatchdogInducedEofCannotCompleteTheStreamSuccessfully() {
+        var closed = new CountDownLatch(1);
+        var tail = new java.io.InputStream() {
+            @Override public int read() throws java.io.IOException {
+                try {
+                    if (!closed.await(5, TimeUnit.SECONDS)) throw new java.io.IOException("body was not closed");
+                    return -1;
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new java.io.InterruptedIOException("interrupted");
+                }
+            }
+            @Override public void close() { closed.countDown(); }
+        };
+        var sse = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"stop\"}]}\n\n";
+        var provider = OpenAiCompatible.ollama().toBuilder().transport(Fixtures.transport(_ -> HttpReply.of(200,
+                Map.of("content-type", List.of("text/event-stream")), new java.io.SequenceInputStream(
+                        new java.io.ByteArrayInputStream(sse.getBytes(java.nio.charset.StandardCharsets.UTF_8)), tail)))).build();
+        var events = new RecordingListener();
+        try (var llm = Fixtures.runtime(provider)) {
+            llm.addListener(events);
+            var options = ChatOptions.builder().timeouts(t -> t.streamIdle(Duration.ofMillis(200))).build();
+            try (var stream = llm.stream(llm.model("ollama", "test"), Conversation.of("hi"), options)) {
+                var error = assertThrows(RequestTimeoutException.class, stream::result);
+                assertEquals(net.ai.gate.error.ErrorCode.STREAM_IDLE_TIMEOUT, error.code());
+                assertEquals("partial", error.partial().orElseThrow().text());
+                assertEquals(RequestEvent.Finished.Outcome.FAILED, events.events(RequestEvent.Finished.class).getFirst().outcome());
+            }
+        }
+    }
+
     @Test
     void aViewYieldsOneIteratorOnly() {
         var fake = FakeProvider.create().reply("one two");

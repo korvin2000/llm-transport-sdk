@@ -153,6 +153,8 @@ mapping steps live in `spi.protocol.Codecs`; `testing/FakeWireApi` remains the s
 
 ## Known limits
 
+See [the reliability review](REVIEW.md) for ranked findings, regression evidence, and remaining follow-up work.
+
 - `models.json` is generated from models.dev (text models of the preset providers; OpenRouter is listed live). Its
   prices are the feed's, not an invoice; the runtime feed refreshes them unless `CatalogOptions.offline()`/`noFeeds()`.
 - Thinking formats that depend on the model generation are chosen by model id: Claude models after 4.5 think

@@ -120,16 +120,17 @@ public final class StandardOAuth implements OAuthAuth {
     private static String code(String answer, String state) {
         var value = answer.strip();
         Map<String, String> params;
+        boolean callback = value.contains("?") || value.startsWith("http") || value.contains("code=") || value.contains("error=");
         if (value.contains("?") || value.startsWith("http")) params = query(URI.create(value).getRawQuery());
-        else if (value.contains("code=")) params = query(value);
+        else if (callback) params = query(value);
         else {
             var hash = value.indexOf('#');
             params = hash < 0 ? Map.of("code", value) : Map.of("code", value.substring(0, hash), "state", value.substring(hash + 1));
         }
+        if ((callback || params.containsKey("state")) && !state.equals(params.get("state")))
+            throw failure(ErrorCode.LOGIN_CANCELLED, "the callback state does not match this login", null);
         if (params.containsKey("error"))
             throw failure(ErrorCode.LOGIN_CANCELLED, params.get("error") + ": " + params.getOrDefault("error_description", "no details"), null);
-        if (params.containsKey("state") && !params.get("state").equals(state))
-            throw failure(ErrorCode.LOGIN_CANCELLED, "the callback state does not match this login", null);
         var code = params.get("code");
         if (code == null || code.isBlank()) throw failure(ErrorCode.LOGIN_CANCELLED, "no authorization code was returned", null);
         return code;
@@ -175,6 +176,7 @@ public final class StandardOAuth implements OAuthAuth {
 
     /// Rotation: a response without a new refresh token keeps the old one; the account stays bound.
     @Override public OAuthCredential refresh(OAuthCredential credential) {
+        checkBinding(credential);
         var refresh = credential.refresh().orElseThrow(() -> failure(ErrorCode.REFRESH_FAILED, "no refresh token is stored", null));
         var request = new LinkedHashMap<String, String>();
         request.put("grant_type", "refresh_token");
@@ -184,16 +186,18 @@ public final class StandardOAuth implements OAuthAuth {
     }
 
     @Override public ResolvedAuth toAuth(OAuthCredential credential) {
+        checkBinding(credential);
         var headers = new LinkedHashMap<String, String>();
         headers.put("Authorization", "Bearer " + credential.access().reveal());
         config.accountHeader().ifPresent(name -> credential.account().ifPresent(account -> headers.put(name, account)));
         return ResolvedAuth.headers(headers, "OAuth");
     }
 
-    /// The refresh token when there is one (revoking it ends the grant), else the access token.
+    /// The refresh token when there is one (revoking it ends the grant), else the access token. A credential of
+    /// another issuer or client cannot be revoked here: nothing is sent, and the caller's local logout proceeds.
     @Override public void revoke(OAuthCredential credential) {
         var endpoint = config.revocationEndpoint().orElse(null);
-        if (endpoint == null) return;
+        if (endpoint == null || !bound(credential)) return;
         var token = credential.refresh().orElse(credential.access());
         post(endpoint, Map.of("token", token.reveal(), "token_type_hint", credential.refresh().isPresent() ? "refresh_token" : "access_token",
                 "client_id", config.clientId()), config.jsonTokenRequests(), ErrorCode.INVALID_REQUEST);
@@ -205,7 +209,11 @@ public final class StandardOAuth implements OAuthAuth {
 
     private OAuthCredential credential(JsonObject body, @Nullable OAuthCredential previous) {
         var mapper = config.tokenResponseMapper().orElse(null);
-        if (mapper != null) return mapper.apply(body);
+        if (mapper != null) {
+            var mapped = mapper.apply(body);
+            checkBinding(mapped);
+            return mapped;
+        }
         var access = body.optString("access_token").orElseThrow(() -> failure(ErrorCode.REFRESH_FAILED, "the token response has no access_token", null));
         var account = account(body).orElse(previous == null ? null : previous.account().orElse(null));
         if (account == null && !config.accountClaim().isEmpty())
@@ -241,6 +249,15 @@ public final class StandardOAuth implements OAuthAuth {
     }
 
     private String issuer() { return config.authorizationEndpoint().getScheme() + "://" + config.authorizationEndpoint().getAuthority(); }
+
+    private boolean bound(OAuthCredential credential) {
+        return issuer().equals(credential.issuer()) && config.clientId().equals(credential.clientId());
+    }
+
+    private void checkBinding(OAuthCredential credential) {
+        if (!bound(credential))
+            throw failure(ErrorCode.LOGIN_REQUIRED, "the stored credential belongs to another issuer or client; sign in again", null);
+    }
 
     private record Reply(int status, JsonObject body) { }
 

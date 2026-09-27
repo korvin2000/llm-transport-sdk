@@ -3,6 +3,7 @@ package net.ai.gate.vendors.openai;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -16,6 +17,11 @@ import net.ai.gate.chat.content.ToolResult;
 import net.ai.gate.chat.options.ChatOptions;
 import net.ai.gate.chat.stream.ChatEvent;
 import net.ai.gate.chat.tool.Tool;
+import net.ai.gate.error.ProviderException;
+import net.ai.gate.error.RateLimitedException;
+import net.ai.gate.error.ErrorCode;
+import net.ai.gate.event.RequestEvent;
+import net.ai.gate.testing.RecordingListener;
 import net.ai.gate.json.Json;
 import net.ai.gate.json.JsonObject;
 import net.ai.gate.model.Model;
@@ -25,6 +31,38 @@ import net.ai.gate.vendors.WireScript;
 import org.junit.jupiter.api.Test;
 
 class OpenAiWireTest {
+    @Test
+    void failedResponsesPreserveQuotaErrorsInBothModes() {
+        var response = "{\"status\":\"failed\",\"error\":{\"code\":\"insufficient_quota\",\"message\":\"budget exhausted\"},\"output\":[]}";
+        var wire = new WireScript().json(response).sse("{\"type\":\"response.failed\",\"response\":" + response + "}");
+        try (var llm = wire.runtime(OpenAi.provider(), "OPENAI_API_KEY")) {
+            var model = llm.model("openai", "gpt-5.1");
+            var completeError = assertThrows(RateLimitedException.class, () -> llm.complete(model, "hi"));
+            assertEquals(ErrorCode.QUOTA_EXHAUSTED, completeError.code());
+            try (var stream = llm.stream(model, Conversation.of("hi"))) {
+                assertEquals(ErrorCode.QUOTA_EXHAUSTED, assertThrows(RateLimitedException.class, stream::result).code());
+            }
+            assertEquals(2, wire.calls().size());
+        }
+    }
+
+    @Test
+    void aFailedResponseThrowsWithItsPartialOutput() {
+        var wire = new WireScript().json("""
+                {"id":"resp_failed","status":"failed","error":{"code":"server_error","message":"generation failed"},
+                 "output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}
+                """);
+        var events = new RecordingListener();
+        try (var llm = wire.runtime(OpenAi.provider(), "OPENAI_API_KEY")) {
+            llm.addListener(events);
+            var error = assertThrows(ProviderException.class, () -> llm.complete(llm.model("openai", "gpt-5.1"), "hi"));
+            assertEquals("partial", error.partial().orElseThrow().text());
+            assertEquals(StopReason.ERROR, error.partial().orElseThrow().stopReason());
+            assertEquals(1, wire.calls().size());
+            assertEquals(RequestEvent.Finished.Outcome.FAILED, events.events(RequestEvent.Finished.class).getFirst().outcome());
+        }
+    }
+
     record Weather(String city) { }
 
     private static final Conversation ASK = Conversation.builder().system("Be brief.")

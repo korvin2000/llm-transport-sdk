@@ -186,7 +186,10 @@ final class DefaultChatStream implements ChatStream {
     private void step() {
         try {
             call.checkActive();
-            if (frames.hasNext()) {
+            boolean hasNext = frames.hasNext();
+            call.watchdogFired(watchdog.fired());
+            call.checkActive();   // an aborted body may report EOF instead of throwing
+            if (hasNext) {
                 var frame = frames.next();
                 record(frame);
                 deliver(decoder.onFrame(frame));

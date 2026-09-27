@@ -15,16 +15,17 @@ import net.ai.gate.json.JsonString;
 import net.ai.gate.json.JsonValue;
 import org.jspecify.annotations.Nullable;
 
-/// Immutable retry rules. Defaults: 3 attempts; retry on pre-send connection failures and 408, 409, 429, 500, 502,
+/// Immutable retry rules. Defaults: 3 attempts; retry on pre-send connection failures and 408, 409, 429,
 /// 503, 529 — responses providers document as *not processed*; honour `Retry-After` up to 60 s; exponential backoff
 /// 500 ms × 2 capped at 8 s with full jitter. Never after visible stream output, never after an ambiguous post-send
-/// failure (504, timeouts, resets): those surface with `outcomeUnknown()`.
+/// failure (500, 502, 504, timeouts, resets): those surface with `outcomeUnknown()` unless the codec establishes
+/// that the request was not processed. A host can then opt those statuses into its retry policy.
 ///
 /// A policy may be partial: a field never set inherits from the wider scope (call ▷ provider ▷ runtime) and finally
 /// from these defaults. The accessors always answer with the effective value.
 public final class RetryPolicy {
     private static final int DEFAULT_ATTEMPTS = 3;
-    private static final Set<Integer> DEFAULT_STATUSES = Set.of(408, 409, 429, 500, 502, 503, 529);
+    private static final Set<Integer> DEFAULT_STATUSES = Set.of(408, 409, 429, 503, 529);
     private static final Duration DEFAULT_INITIAL = Duration.ofMillis(500), DEFAULT_MAX = Duration.ofSeconds(8),
             DEFAULT_RETRY_AFTER = Duration.ofSeconds(60);
     private static final double DEFAULT_MULTIPLIER = 2.0;

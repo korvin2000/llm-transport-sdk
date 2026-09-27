@@ -45,6 +45,19 @@ import org.junit.jupiter.api.Timeout;
 /// concurrent rejections share that refresh, and failures keep their cause. Real OAuth endpoints stay deferred.
 @Timeout(20)
 class AuthResolverTest {
+    @Test
+    void credentialsForAnotherOAuthClientAreNotReportedAsConfigured() {
+        var config = OAuthConfig.builder("new-client").authorizationEndpoint(URI.create("https://issuer.example/auth"))
+                .tokenEndpoint(URI.create("https://issuer.example/token")).build();
+        var provider = FakeProvider.create().provider().toBuilder().auth(OAuthAuth.standard(config)).build();
+        var store = CredentialStore.inMemory();
+        store.update("fake", _ -> Optional.of(token("old")));
+        try (var llm = Llm.builder().provider(provider).credentials(store).environment(Environment.none()).catalog(c -> c.offline()).build()) {
+            assertEquals(AuthStatus.State.NOT_CONFIGURED, llm.auth().status("fake").state());
+            assertTrue(llm.models().available().isEmpty());
+        }
+    }
+
     /// Refreshes by appending `+1` to the access token; counts refreshes.
     static final class CountingOAuth implements OAuthAuth {
         final AtomicInteger refreshes = new AtomicInteger();
@@ -152,6 +165,44 @@ class AuthResolverTest {
             assertEquals(AuthStatus.State.REFRESH_FAILED, llm.auth().status("fake").state());
             assertEquals(1, events.events(CredentialEvent.RefreshFailed.class).size());
             assertTrue(fake.requests().isEmpty(), "no request with the environment key");
+        }
+    }
+
+    @Test
+    void aRefreshInterruptedByTheDeadlineIsNotRecordedAsAFailedRefresh() throws Exception {
+        var fake = FakeProvider.create().reply("never");
+        var refreshing = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var oauth = new OAuthAuth() {
+            @Override public String name() { return "Blocking OAuth"; }
+            @Override public OAuthCredential login(AuthInteraction ui, CancelToken cancel) { throw new UnsupportedOperationException(); }
+            @Override public OAuthCredential refresh(OAuthCredential credential) {
+                refreshing.countDown();
+                try {
+                    if (!release.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("test did not release the refresh");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();   // as the standard flow does when its token request is interrupted
+                    throw new IllegalStateException("refresh interrupted", e);
+                }
+                return credential;
+            }
+            @Override public ResolvedAuth toAuth(OAuthCredential credential) { return ResolvedAuth.headers(Map.of("Authorization", "Bearer " + credential.access().reveal()), "OAuth"); }
+        };
+        var provider = provider(fake, oauth, gate(fake.provider().transport().orElseThrow(), java.util.Set.of(), new AtomicInteger()));
+        var store = CredentialStore.inMemory();
+        store.update("fake", _ -> Optional.of(token("old").toBuilder().expiresAt(Instant.now()).build()));
+        var events = new RecordingListener();
+        try (var llm = Llm.builder().provider(provider).credentials(store).environment(Environment.none()).catalog(c -> c.offline()).listener(events).build()) {
+            try {
+                assertThrows(net.ai.gate.error.RequestTimeoutException.class, () -> llm.complete(llm.model("fake", "fake"),
+                        net.ai.gate.chat.Conversation.of("hi"), net.ai.gate.chat.options.ChatOptions.builder().timeouts(t -> t.total(java.time.Duration.ofMillis(100))).build()));
+            } finally {
+                release.countDown();
+            }
+            assertTrue(refreshing.await(1, TimeUnit.SECONDS));
+            assertEquals(AuthStatus.State.EXPIRING, llm.auth().status("fake").state(), "a timeout is not a rejected refresh token");
+            assertTrue(events.events(CredentialEvent.RefreshFailed.class).isEmpty());
+            assertEquals("old", ((OAuthCredential) store.read("fake").orElseThrow()).access().reveal(), "the credential is untouched");
         }
     }
 

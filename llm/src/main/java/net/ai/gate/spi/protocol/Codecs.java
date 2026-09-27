@@ -11,6 +11,7 @@ import net.ai.gate.error.ErrorCode;
 import net.ai.gate.error.LlmException;
 import net.ai.gate.error.ProviderException;
 import net.ai.gate.error.RateLimitedException;
+import net.ai.gate.internal.http.HttpErrors;
 import net.ai.gate.json.Json;
 import net.ai.gate.json.JsonMapper;
 import net.ai.gate.json.JsonObject;
@@ -85,13 +86,14 @@ public final class Codecs {
         throw new IllegalArgumentException("Expected a JSON object frame: " + frame);
     }
 
-    /// A failure the provider reported inside a stream after a 2xx status: rate limits and overload stay typed,
+    /// A failure the provider reported inside a stream after a 2xx status: quotas, rate limits and overload stay typed,
     /// anything else is a server error.
     public static LlmException streamError(String type, String message) {
         var lower = type.toLowerCase(Locale.ROOT);
-        var code = lower.contains("rate_limit") || lower.contains("resource_exhausted") ? ErrorCode.RATE_LIMITED
+        var code = HttpErrors.QUOTA.contains(lower) ? ErrorCode.QUOTA_EXHAUSTED
+                : lower.contains("rate_limit") || lower.contains("resource_exhausted") ? ErrorCode.RATE_LIMITED
                 : lower.contains("overloaded") || lower.contains("unavailable") ? ErrorCode.OVERLOADED : ErrorCode.SERVER_ERROR;
         var details = LlmException.Details.builder(code, "Stream error " + type + ": " + message).providerCode(type).build();
-        return code == ErrorCode.RATE_LIMITED ? new RateLimitedException(details) : new ProviderException(details);
+        return code == ErrorCode.RATE_LIMITED || code == ErrorCode.QUOTA_EXHAUSTED ? new RateLimitedException(details) : new ProviderException(details);
     }
 }

@@ -9,14 +9,19 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.InterruptedIOException;
 import java.time.Duration;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import net.ai.gate.cache.ResponseCache;
+import net.ai.gate.auth.ApiKeyAuth;
+import net.ai.gate.auth.Secret;
+import net.ai.gate.auth.TokenSupplier;
 import net.ai.gate.chat.Conversation;
 import net.ai.gate.chat.options.ChatOptions;
 import net.ai.gate.error.LlmException;
+import net.ai.gate.error.ProviderException;
 import net.ai.gate.error.RequestCancelledException;
 import net.ai.gate.error.RequestTimeoutException;
 import net.ai.gate.event.RequestEvent;
@@ -31,6 +36,92 @@ import org.junit.jupiter.api.Timeout;
 /// replay, while a body is read, while an error body is read — with exactly one terminal event.
 @Timeout(20)
 class CallLifetimeTest {
+    @Test
+    void aDeadlineCanInterruptWaitingForAnotherTokenFetch() throws Exception {
+        var fetching = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var fake = FakeProvider.create().reply("first");
+        var auth = ApiKeyAuth.dynamic("shared identity", () -> {
+            fetching.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) throw new InterruptedIOException("test did not release fetch");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new InterruptedIOException("fetch interrupted");
+            }
+            return new TokenSupplier.AccessToken(Secret.of("test-token"), Optional.empty());
+        });
+        try (var llm = Fixtures.runtime(fake.provider().toBuilder().auth(auth).build())) {
+            var model = llm.model("fake", "fake");
+            var first = llm.completeAsync(model, Conversation.of("first"));
+            assertTrue(fetching.await(2, TimeUnit.SECONDS));
+            var error = new AtomicReference<Throwable>();
+            var waiter = Thread.ofVirtual().start(() -> {
+                try {
+                    llm.complete(model, Conversation.of("second"), ChatOptions.builder().timeouts(t -> t.total(Duration.ofMillis(100))).build());
+                } catch (Throwable e) {
+                    error.set(e);
+                }
+            });
+            try {
+                waiter.join(Duration.ofSeconds(1));
+                assertFalse(waiter.isAlive(), "a waiter must respect its own deadline while another call holds the token lock");
+                assertInstanceOf(RequestTimeoutException.class, error.get());
+            } finally {
+                release.countDown();
+                waiter.join(Duration.ofSeconds(2));
+            }
+            assertEquals("first", first.get(2, TimeUnit.SECONDS).text());
+        }
+    }
+
+    @Test
+    void ambiguousServerFailuresDoNotRepeatGeneration() {
+        for (int status : new int[] {500, 502}) {
+            var sends = new java.util.concurrent.atomic.AtomicInteger();
+            var fake = FakeProvider.create().reply("duplicated generation");
+            var transport = fake.provider().transport().orElseThrow();
+            var provider = fake.provider().toBuilder().transport((request, options) -> {
+                if (sends.incrementAndGet() == 1) return Fixtures.error(status, "server_error", "upstream failed");
+                return transport.send(request, options);
+            }).build();
+            try (var llm = Fixtures.runtime(provider)) {
+                var error = assertThrows(ProviderException.class, () -> llm.complete(llm.model("fake", "fake"), "hi"));
+                assertTrue(error.outcomeUnknown(), "HTTP " + status + " does not prove the request was not processed");
+                assertFalse(error.retryable());
+                assertEquals(1, sends.get());
+            }
+        }
+    }
+
+    @Test
+    void totalDeadlineInterruptsCredentialResolution() {
+        var fake = FakeProvider.create().reply("never");
+        var auth = ApiKeyAuth.dynamic("slow identity", () -> {
+            try {
+                Thread.sleep(Duration.ofSeconds(2));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new InterruptedIOException("identity request interrupted");
+            }
+            return new TokenSupplier.AccessToken(Secret.of("test-token"), Optional.empty());
+        });
+        var provider = fake.provider().toBuilder().auth(auth).build();
+        var events = new RecordingListener();
+        try (var llm = Fixtures.runtime(provider)) {
+            llm.addListener(events);
+            long start = System.nanoTime();
+            var error = assertThrows(RequestTimeoutException.class, () -> llm.complete(llm.model("fake", "fake"),
+                    Conversation.of("hi"), ChatOptions.builder().timeouts(t -> t.total(Duration.ofMillis(100))).build()));
+            assertTrue(Duration.ofNanos(System.nanoTime() - start).compareTo(Duration.ofSeconds(1)) < 0,
+                    "the deadline must interrupt the supplier, not wait for it to return");
+            assertFalse(Thread.currentThread().isInterrupted(), "the SDK's timeout interrupt must not escape");
+            assertFalse(error.outcomeUnknown());
+            assertTrue(fake.requests().isEmpty());
+            assertEquals(1, events.events(RequestEvent.Finished.class).size());
+        }
+    }
+
     @Test
     void cancelledBeforeStartIsNeverSent() {
         var fake = FakeProvider.create().reply("never");

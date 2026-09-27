@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
 import net.ai.gate.auth.Credential;
@@ -35,19 +36,19 @@ import net.ai.gate.json.JsonValue;
 /// updates serialized in-process and across processes by a lock file, written by atomic replacement. Not encrypted.
 public final class FileStore implements CredentialStore {
     private static final String SCHEMA = "ai-gate.credentials/1";
-    /// One monitor per normalized path, shared by every `FileStore` on it in this JVM: two instances must not both
+    /// One interruptible lock per normalized path, shared by every `FileStore` on it in this JVM: two instances must not both
     /// enter `update` and race the cross-process file lock, which throws `OverlappingFileLockException` on overlap
     /// instead of waiting for a lock already held by this same JVM.
-    private static final Map<Path, Object> LOCKS = new ConcurrentHashMap<>();
+    private static final Map<Path, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
     private static final System.Logger LOG = System.getLogger("net.ai.gate.auth");
 
     private final Path path, lock;
-    private final Object intraProcessLock;
+    private final ReentrantLock intraProcessLock;
 
     public FileStore(Path path) {
         this.path = path.toAbsolutePath().normalize();
         this.lock = this.path.resolveSibling(this.path.getFileName() + ".lock");
-        this.intraProcessLock = LOCKS.computeIfAbsent(this.path, _ -> new Object());
+        this.intraProcessLock = LOCKS.computeIfAbsent(this.path, _ -> new ReentrantLock());
     }
 
     @Override public Optional<Credential> read(String key) { return Optional.ofNullable(load().get(key)); }
@@ -57,7 +58,14 @@ public final class FileStore implements CredentialStore {
     }
 
     @Override public Optional<Credential> update(String key, Function<Optional<Credential>, Optional<Credential>> change) {
-        synchronized (intraProcessLock) {
+        try {
+            intraProcessLock.lockInterruptibly();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AuthenticationException(LlmException.Details.builder(ErrorCode.CREDENTIAL_STORE,
+                    "Interrupted while waiting to update credential file " + path).build(), e);
+        }
+        try {
             try {
                 Files.createDirectories(path.getParent());
                 try (var channel = FileChannel.open(lock, StandardOpenOption.CREATE, StandardOpenOption.WRITE); var _ = channel.lock()) {
@@ -70,6 +78,8 @@ public final class FileStore implements CredentialStore {
             } catch (IOException e) {
                 throw failure("update", e);
             }
+        } finally {
+            intraProcessLock.unlock();
         }
     }
 

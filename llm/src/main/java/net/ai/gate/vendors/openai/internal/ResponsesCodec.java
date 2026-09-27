@@ -24,6 +24,8 @@ import net.ai.gate.chat.stream.ChatEvent;
 import net.ai.gate.chat.tool.FunctionTool;
 import net.ai.gate.chat.tool.ProviderTool;
 import net.ai.gate.chat.tool.ToolChoice;
+import net.ai.gate.error.ProviderException;
+import net.ai.gate.error.RateLimitedException;
 import net.ai.gate.json.Json;
 import net.ai.gate.json.JsonObject;
 import net.ai.gate.json.JsonValue;
@@ -227,7 +229,15 @@ public final class ResponsesCodec implements WireApi {
             var part = part(item);
             if (part != null) b.add(part);
         }
-        return b.build();
+        var message = b.build();
+        if (message.stopReason() == StopReason.ERROR) {
+            var error = response.object("error");
+            var failure = Codecs.streamError(error.optString("code").orElse("response_failed"),
+                    message.errorMessage().orElse("The response failed"));
+            var details = failure.details().toBuilder().partial(message).build();
+            throw failure instanceof RateLimitedException ? new RateLimitedException(details) : new ProviderException(details);
+        }
+        return message;
     }
 
     /// Stop reason, usage and ids of a (final) response object.

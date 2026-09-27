@@ -17,7 +17,6 @@ import java.util.Objects;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -113,7 +112,8 @@ final class Call {
     RuntimeException fail(RuntimeException error, @Nullable AssistantMessage partial) {
         var failure = error instanceof UncheckedIOException io ? classify(io.getCause()) : error;
         if (failure instanceof LlmException e) {
-            var marked = partial == null ? null : partial.toBuilder()
+            var available = partial != null ? partial : e.partial().orElse(null);
+            var marked = available == null ? null : available.toBuilder()
                     .stopReason(e instanceof RequestCancelledException ? StopReason.ABORTED : StopReason.ERROR).errorMessage(e.getMessage()).build();
             failure = HttpErrors.withFacts(e, requestId, provider.id(), attempts, marked);
             finished(failure instanceof RequestCancelledException ? Outcome.CANCELLED : Outcome.FAILED, marked, (LlmException) failure, false);
@@ -245,12 +245,38 @@ final class Call {
     /// Cancellation interrupts the blocked thread; only an interrupt caused by the token is cleared afterwards, an
     /// interrupt from elsewhere stays pending for the caller.
     private <T> T blocking(IoAction<T> action) throws IOException {
-        var thread = Thread.currentThread();
-        var byToken = new AtomicBoolean();
-        try (var _ = token.onCancel(() -> { byToken.set(true); thread.interrupt(); })) {
-            return action.run();
-        } finally {
-            if (byToken.get()) Thread.interrupted();
+        var interrupt = new BlockingInterrupt();
+        try (var _ = token.onCancel(() -> interrupt.abort(null));
+             var _ = new Watchdog(() -> interrupt.abort(ErrorCode.DEADLINE_EXCEEDED), deadline, null, System::nanoTime);
+             interrupt) {
+            try {
+                checkActive();
+                return action.run();
+            } catch (IOException | RuntimeException e) {
+                if (watchdogFired != null || token.isCancelled()) throw classify(e);
+                throw e;
+            }
+        }
+    }
+
+    /// Serializes interruption with leaving a blocking phase, so a late callback cannot interrupt the caller's
+    /// next operation. An interrupt already pending before ours belongs to the caller and is preserved.
+    private final class BlockingInterrupt implements AutoCloseable {
+        private final Thread thread = Thread.currentThread();
+        private boolean active = true, interrupted;
+
+        synchronized void abort(@Nullable ErrorCode reason) {
+            if (!active) return;
+            watchdogFired(reason);
+            if (!thread.isInterrupted()) {
+                interrupted = true;
+                thread.interrupt();
+            }
+        }
+
+        @Override public synchronized void close() {
+            active = false;
+            if (interrupted) Thread.interrupted();
         }
     }
 
@@ -284,6 +310,7 @@ final class Call {
     }
 
     void checkActive() {
+        if (watchdogFired != null) throw classify(null);
         if (token.isCancelled()) throw cancelled(null);
         if (deadline != null && System.nanoTime() - deadline >= 0)
             throw new RequestTimeoutException(details(ErrorCode.DEADLINE_EXCEEDED, "The total deadline of " + timeouts.total().orElseThrow()

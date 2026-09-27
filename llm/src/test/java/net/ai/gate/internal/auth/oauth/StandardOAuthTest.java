@@ -2,6 +2,7 @@ package net.ai.gate.internal.auth.oauth;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -121,7 +122,8 @@ class StandardOAuthTest {
                 var query = StandardOAuth.query(open.url().getRawQuery());
                 challenges.put("code-1", query.get("code_challenge"));
                 assertEquals("S256", query.get("code_challenge_method"));
-                var callback = URI.create(query.get("redirect_uri") + "?code=code-1&state=" + (stateOverride != null ? stateOverride : query.get("state")));
+                var callback = URI.create(query.get("redirect_uri") + "?code=code-1"
+                        + ("omit".equals(stateOverride) ? "" : "&state=" + (stateOverride != null ? stateOverride : query.get("state"))));
                 Thread.startVirtualThread(() -> {
                     try (var http = HttpClient.newHttpClient()) {
                         http.send(HttpRequest.newBuilder(callback).build(), HttpResponse.BodyHandlers.discarding());
@@ -156,6 +158,31 @@ class StandardOAuthTest {
         var oauth = new StandardOAuth(config().build());
         var error = assertThrows(AuthenticationException.class, () -> oauth.login(browser("forged"), CancelToken.create()));
         assertEquals(ErrorCode.LOGIN_CANCELLED, error.code());
+    }
+
+    @Test
+    void aCallbackWithoutStateIsRejectedBeforeExchangingTheCode() {
+        var oauth = new StandardOAuth(config().build());
+        var error = assertThrows(AuthenticationException.class, () -> oauth.login(browser("omit"), CancelToken.create()));
+        assertEquals(ErrorCode.LOGIN_CANCELLED, error.code());
+        assertTrue(requests.isEmpty(), "a callback without state must never reach the token endpoint");
+    }
+
+    @Test
+    void credentialsFromAnotherIssuerOrClientAreRejectedBeforeUse() {
+        var oauth = new StandardOAuth(config().build());
+        var wrongIssuer = OAuthCredential.builder(Secret.of("foreign-access"), "https://other.example", "client-1")
+                .refresh(Secret.of("foreign-refresh")).build();
+        var wrongClient = OAuthCredential.builder(Secret.of("foreign-access"), base.toString(), "other-client")
+                .refresh(Secret.of("foreign-refresh")).build();
+        for (var credential : List.of(wrongIssuer, wrongClient)) {
+            assertEquals(ErrorCode.LOGIN_REQUIRED,
+                    assertThrows(AuthenticationException.class, () -> oauth.toAuth(credential)).code());
+            assertEquals(ErrorCode.LOGIN_REQUIRED,
+                    assertThrows(AuthenticationException.class, () -> oauth.refresh(credential)).code());
+            oauth.revoke(credential);   // nothing to revoke here; a local logout must still be able to drop it
+        }
+        assertTrue(requests.isEmpty(), "foreign tokens must never reach this issuer");
     }
 
     @Test
@@ -253,7 +280,17 @@ class StandardOAuthTest {
     @Test
     void mapperHandlesNonStandardResponses() {
         var oauth = new StandardOAuth(config().jsonTokenRequests()
-                .tokenResponseMapper(json -> OAuthCredential.builder(Secret.of(json.string("access_token") + "-mapped"), "issuer", "client-1").build()).build());
-        assertEquals("access-1-mapped", oauth.login(browser(null), CancelToken.create()).access().reveal());
+                .tokenResponseMapper(json -> OAuthCredential.builder(Secret.of(json.string("access_token") + "-mapped"), base.toString(), "client-1").build()).build());
+        var credential = oauth.login(browser(null), CancelToken.create());
+        assertEquals("access-1-mapped", credential.access().reveal());
+        assertEquals("Bearer access-1-mapped", oauth.toAuth(credential).headers().get("Authorization"));
+    }
+
+    @Test
+    void aMapperWithTheWrongBindingFailsDuringLogin() {
+        var oauth = new StandardOAuth(config().tokenResponseMapper(json ->
+                OAuthCredential.builder(Secret.of(json.string("access_token")), "https://other.example", "client-1").build()).build());
+        assertEquals(ErrorCode.LOGIN_REQUIRED,
+                assertThrows(AuthenticationException.class, () -> oauth.login(browser(null), CancelToken.create())).code());
     }
 }

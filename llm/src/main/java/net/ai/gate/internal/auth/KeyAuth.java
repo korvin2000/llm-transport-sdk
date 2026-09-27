@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.locks.ReentrantLock;
 
 import net.ai.gate.auth.ApiKeyAuth;
 import net.ai.gate.auth.ApiKeyCredential;
@@ -33,7 +34,8 @@ public final class KeyAuth implements ApiKeyAuth {
     private final Kind kind;
     private final List<String> envVars;
     private final @Nullable TokenSupplier supplier;
-    private TokenSupplier.@Nullable AccessToken cached; // guarded by this
+    private final ReentrantLock tokenLock = new ReentrantLock();
+    private TokenSupplier.@Nullable AccessToken cached; // guarded by tokenLock
 
     private KeyAuth(String name, Kind kind, String header, List<String> envVars, @Nullable TokenSupplier supplier) {
         this.name = name; this.kind = kind; this.header = header; this.envVars = List.copyOf(envVars); this.supplier = supplier;
@@ -98,13 +100,19 @@ public final class KeyAuth implements ApiKeyAuth {
         return Optional.empty();
     }
 
-    private synchronized Secret token() {
-        var now = Instant.now();
-        if (cached != null && cached.expiresAt().map(e -> now.plus(SKEW).isBefore(e)).orElse(true)) return cached.token();
+    private Secret token() {
         try {
-            cached = Objects.requireNonNull(supplier).fetch();
-            return cached.token();
-        } catch (IOException | RuntimeException e) {
+            tokenLock.lockInterruptibly();
+            try {
+                var now = Instant.now();
+                if (cached != null && cached.expiresAt().map(e -> now.plus(SKEW).isBefore(e)).orElse(true)) return cached.token();
+                cached = Objects.requireNonNull(supplier).fetch();
+                return cached.token();
+            } finally {
+                tokenLock.unlock();
+            }
+        } catch (InterruptedException | IOException | RuntimeException e) {
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             throw new AuthenticationException(LlmException.Details.builder(ErrorCode.REFRESH_FAILED,
                     name + ": fetching an access token failed: " + e.getMessage()).build(), e);
         }
