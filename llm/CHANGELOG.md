@@ -31,8 +31,19 @@ Added, experimental:
   `countTokens`, else a registered `Tokenizer`, else an estimate with its margin).
 - `HistoryPolicy` (`SAME_ORIGIN_REQUIRED`, `REJECT_LOSSY`, `ALLOW_ADAPTATION`) and `Llm.check(…)` → `HistoryIssue`s.
 
-Forms: `ai-gate.conversation/2` and `ai-gate.options/2` are written only when a new member is present; version 1 is
-still written otherwise and both are read.
+- Continuation: `Continuation`, `AssistantMessage.continuation()` (a stored Responses reply), `ChatOptions.Builder
+  .continueFrom(…)` sends `previous_response_id` and only the messages after the continued reply; an unknown id fails
+  with `ErrorCode.CONTINUATION_EXPIRED`; another origin or an API without server-side state adapts with
+  `continuation_ignored` (`strict` fails).
+- Compaction: `Llm.compact(model, conversation, options)` → a reply with stop reason `compaction` and a
+  `Content.Compaction` part that stands in for the history (`conversation.withMessages(List.of(summary))`):
+  Anthropic on-demand compaction (`compact-2026-09-04`, `AnthropicOptions.compactionInstructions`), OpenAI
+  `responses/compact`; threshold-compaction blocks decode and replay too. `WireApi.compactRequest`,
+  `ApiFeatures.compaction()`, `StopReason.COMPACTION`; foreign summaries hand off as their text.
+- `net.ai.gate:ai-gate-kotlin` (module `kotlin/`, the only artifact with a dependency: kotlinx-coroutines):
+  `Llm.completeSuspending`, `Llm.events` (a cold `Flow<ChatEvent>`), `LlmCall.awaitReply` / `awaitOutcome`;
+  cancelling a coroutine cancels the call and never `outcome()`.
 
-Not yet: first-class continuation and compaction (`previous_response_id` stays a raw Responses option); a Kotlin
-coroutine artifact.
+Forms: `ai-gate.conversation/2` and `ai-gate.options/2` are written only when a new member is present, version 3
+(`ai-gate.conversation/3`, `ai-gate.options/3`, `ai-gate.reply/2`) only for a continuation or a compaction part;
+version 1 is still written otherwise and every version is read.

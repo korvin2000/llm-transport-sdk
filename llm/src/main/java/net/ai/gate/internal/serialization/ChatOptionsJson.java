@@ -29,15 +29,17 @@ import net.ai.gate.json.JsonValue;
 import net.ai.gate.model.ReasoningLevel;
 
 /// The canonical JSON form of the portable members of [ChatOptions]; absent fields omitted. Written as
-/// `ai-gate.options/1` unless it states `strictCodes` or `historyPolicy` (version 2); both versions are read.
-/// `cancel`, `listeners` and `payload` are operational and never appear in this form. Provider options and a
-/// [OutputFormat.Typed] output are configuration that cannot be represented and fail [#write(ChatOptions)].
+/// `ai-gate.options/1` unless it states `strictCodes` or `historyPolicy` (version 2) or `continueFrom` (version 3);
+/// every version is read. `cancel`, `listeners` and `payload` are operational and never appear in this form.
+/// Provider options and a [OutputFormat.Typed] output are configuration that cannot be represented and fail
+/// [#write(ChatOptions)].
 public final class ChatOptionsJson {
-    public static final String SCHEMA = "ai-gate.options/2", SCHEMA_V1 = "ai-gate.options/1";
+    public static final String SCHEMA = "ai-gate.options/3", SCHEMA_V2 = "ai-gate.options/2", SCHEMA_V1 = "ai-gate.options/1";
+    private static final Set<String> SCHEMAS = Set.of(SCHEMA, SCHEMA_V2, SCHEMA_V1);
 
     private static final Set<String> FIELDS = Set.of("schema", "temperature", "topP", "topK", "maxTokens", "stop", "seed",
             "reasoning", "reasoningHandoff", "toolChoice", "parallelToolCalls", "strict", "strictCodes", "historyPolicy", "output",
-            "cacheRetention", "sessionId", "responseCache", "timeouts", "retry", "headers", "tags");
+            "cacheRetention", "sessionId", "responseCache", "continueFrom", "timeouts", "retry", "headers", "tags");
 
     private ChatOptionsJson() { }
 
@@ -47,7 +49,8 @@ public final class ChatOptionsJson {
     public static JsonObject write(ChatOptions o) {
         if (!o.providerOptions().isEmpty()) throw new IllegalArgumentException("providerOptions: cannot be represented in JSON");
         var json = new LinkedHashMap<String, JsonValue>();
-        json.put("schema", Json.valueOf(o.strictCodesSetting().isPresent() || o.historyPolicy().isPresent() ? SCHEMA : SCHEMA_V1));
+        json.put("schema", Json.valueOf(o.continuation().isPresent() ? SCHEMA
+                : o.strictCodesSetting().isPresent() || o.historyPolicy().isPresent() ? SCHEMA_V2 : SCHEMA_V1));
         o.temperature().ifPresent(v -> json.put("temperature", JsonNumber.of(v)));
         o.topP().ifPresent(v -> json.put("topP", JsonNumber.of(v)));
         o.topK().ifPresent(v -> json.put("topK", JsonNumber.of((long) v)));
@@ -65,6 +68,7 @@ public final class ChatOptionsJson {
         o.cacheRetention().ifPresent(v -> json.put("cacheRetention", Json.valueOf(lower(v))));
         o.sessionId().ifPresent(v -> json.put("sessionId", Json.valueOf(v)));
         o.responseCache().ifPresent(v -> json.put("responseCache", Json.valueOf(lower(v))));
+        o.continuation().ifPresent(c -> json.put("continueFrom", ConversationJson.writeContinuation(c)));
         o.timeouts().ifPresent(t -> json.put("timeouts", t.toJson()));
         o.retry().ifPresent(r -> json.put("retry", r.toJson()));
         if (!o.headers().isEmpty()) json.put("headers", writeStringMap(o.headers()));
@@ -105,8 +109,8 @@ public final class ChatOptionsJson {
 
     /// @throws IllegalArgumentException naming the member that does not fit, or an unknown member (not prefixed `x-`)
     public static ChatOptions read(JsonObject json) {
-        if (!(json.get("schema").orElse(null) instanceof JsonString s) || !Set.of(SCHEMA, SCHEMA_V1).contains(s.value()))
-            throw fail("schema", "must be '" + SCHEMA + "' or '" + SCHEMA_V1 + "'");
+        if (!(json.get("schema").orElse(null) instanceof JsonString s) || !SCHEMAS.contains(s.value()))
+            throw fail("schema", "must be one of " + SCHEMAS.stream().sorted().toList());
         for (var name : json.members().keySet())
             if (!FIELDS.contains(name) && !name.startsWith("x-")) throw fail(name, "unknown member");
 
@@ -136,6 +140,9 @@ public final class ChatOptionsJson {
         optString(json, "cacheRetention").ifPresent(v -> b.cacheRetention(CacheRetention.valueOf(upper(v))));
         optString(json, "sessionId").ifPresent(b::sessionId);
         optString(json, "responseCache").ifPresent(v -> b.responseCache(CacheMode.valueOf(upper(v))));
+        var continueFrom = json.get("continueFrom").orElse(null);
+        if (continueFrom instanceof JsonObject co) b.continueFrom(ConversationJson.readContinuation(co, "continueFrom"));
+        else if (continueFrom != null && !(continueFrom instanceof JsonNull)) throw fail("continueFrom", "expected an object");
         var timeouts = json.get("timeouts").orElse(null);
         if (timeouts instanceof JsonObject to) b.timeouts(readTimeouts(to));
         else if (timeouts != null && !(timeouts instanceof JsonNull)) throw fail("timeouts", "expected an object");

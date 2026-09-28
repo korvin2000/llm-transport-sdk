@@ -131,6 +131,11 @@ public final class DefaultLlm implements Llm {
         return core.engine().prepare(model, conversation, options, streaming);
     }
 
+    @Override public AssistantMessage compact(Model model, Conversation conversation, ChatOptions options) {
+        var engine = core.engine();
+        return engine.complete(engine.prepareCompaction(model, conversation, options), store);
+    }
+
     @Override public PreparedRequest preview(Model model, Conversation conversation, ChatOptions options) {
         core.checkOpen();
         return core.engine().preview(model, conversation, options);
@@ -203,6 +208,7 @@ public final class DefaultLlm implements Llm {
         o.responseCache().ifPresent(v -> json.put("responseCache", Json.valueOf(v)));
         if (!o.strictCodes().isEmpty()) json.put("strictCodes", Json.valueOf(o.strictCodes().stream().sorted().toList()));
         o.historyPolicy().ifPresent(v -> json.put("historyPolicy", Json.valueOf(v)));
+        o.continuation().ifPresent(c -> json.put("continueFrom", Json.valueOf(c.api() + ":" + c.opaqueId())));
         var timeouts = o.timeouts().orElse(TimeoutPolicy.defaults());
         json.put("timeouts", Json.object("connect", timeouts.connect(), "streamIdle", timeouts.streamIdle(), "total", timeouts.total().orElse(null)));
         var retry = o.retry().orElse(RetryPolicy.defaults());

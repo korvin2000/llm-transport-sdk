@@ -39,8 +39,10 @@ public final class AssistantMessage implements Message {
     private final List<Warning> warnings;
     private final ResponseInfo info;
     private final Instant timestamp;
+    private final @Nullable Continuation continuation;
 
     private AssistantMessage(Builder b) {
+        continuation = b.continuation;
         content = List.copyOf(b.content); stopReason = b.stopReason; errorMessage = b.errorMessage;
         incompleteParts = List.copyOf(b.incompleteParts);
         if (!incompleteParts.isEmpty() && incompleteParts.getLast() >= content.size())
@@ -95,6 +97,15 @@ public final class AssistantMessage implements Message {
     public ResponseInfo info() { return info; }
     @Override public Instant timestamp() { return timestamp; }
 
+    /// Server-side state this reply left behind, for `ChatOptions.Builder.continueFrom(…)`: the OpenAI Responses
+    /// `previous_response_id` of a stored reply. Absent when the API keeps none, which is the default everywhere.
+    public Optional<Continuation> continuation() { return Optional.ofNullable(continuation); }
+
+    /// The summary of a `Llm.compact` reply (stop reason `compaction`), if this reply carries one.
+    public Optional<Content.Compaction> compaction() {
+        return content.stream().filter(Content.Compaction.class::isInstance).map(Content.Compaction.class::cast).findFirst();
+    }
+
     /// Parses `text()` as JSON.
     /// @throws InvalidResponseException `output_invalid` (`partial()` keeps this reply)
     public JsonValue json() {
@@ -125,13 +136,13 @@ public final class AssistantMessage implements Message {
 
     public Builder toBuilder() {
         var b = new Builder(model, api).content(content).stopReason(stopReason).errorMessage(errorMessage).usage(usage)
-                .responseModel(responseModel).responseId(responseId).warnings(warnings).info(info);
+                .responseModel(responseModel).responseId(responseId).warnings(warnings).info(info).continuation(continuation);
         b.incompleteParts.addAll(incompleteParts);
         b.timestamp = timestamp;
         return b;
     }
 
-    /// An archive form (`ai-gate.reply/1`) — the message as in a conversation's JSON form, plus the provider's raw usage
+    /// An archive form (`ai-gate.reply/1`, `/2` with a continuation or compaction) — the message as in a conversation's JSON form, plus the provider's raw usage
     /// and the call facts of [#info()], which the conversation form leaves out.
     public JsonObject toJson() { return ConversationJson.writeReply(this); }
 
@@ -142,7 +153,8 @@ public final class AssistantMessage implements Message {
     @Override public boolean equals(Object o) {
         return o instanceof AssistantMessage m && content.equals(m.content) && incompleteParts.equals(m.incompleteParts) && stopReason.equals(m.stopReason)
                 && Objects.equals(errorMessage, m.errorMessage) && usage.equals(m.usage) && model.equals(m.model)
-                && api.equals(m.api) && Objects.equals(responseModel, m.responseModel) && Objects.equals(responseId, m.responseId);
+                && api.equals(m.api) && Objects.equals(responseModel, m.responseModel) && Objects.equals(responseId, m.responseId)
+                && Objects.equals(continuation, m.continuation);
     }
 
     @Override public int hashCode() { return Objects.hash(content, stopReason, usage, model, api, responseId); }
@@ -163,6 +175,7 @@ public final class AssistantMessage implements Message {
         private final List<Warning> warnings = new ArrayList<>();
         private ResponseInfo info = ResponseInfo.empty();
         private @Nullable Instant timestamp;
+        private @Nullable Continuation continuation;
 
         private Builder(ModelRef model, String api) { this.model = model; this.api = Checks.notBlank(api, "API id"); }
 
@@ -185,6 +198,8 @@ public final class AssistantMessage implements Message {
         public Builder warnings(List<Warning> values) { warnings.clear(); warnings.addAll(values); return this; }
         public Builder info(ResponseInfo value) { info = value; return this; }
         public Builder timestamp(Instant value) { timestamp = value; return this; }
+        /// The server-side state the API kept for this reply; `null` for none.
+        public Builder continuation(@Nullable Continuation value) { continuation = value; return this; }
         public AssistantMessage build() { return new AssistantMessage(this); }
     }
 }

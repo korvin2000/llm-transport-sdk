@@ -16,17 +16,23 @@ import org.jspecify.annotations.Nullable;
 
 import net.ai.gate.cache.CacheRetention;
 import net.ai.gate.chat.AssistantMessage;
+import net.ai.gate.chat.Continuation;
+import net.ai.gate.chat.Conversation;
 import net.ai.gate.chat.StopReason;
 import net.ai.gate.chat.ToolResultMessage;
 import net.ai.gate.chat.UserMessage;
 import net.ai.gate.chat.content.Content;
 import net.ai.gate.chat.content.ToolCall;
 import net.ai.gate.chat.content.ToolResult;
+import net.ai.gate.chat.options.ChatOptions;
 import net.ai.gate.chat.options.OutputFormat;
 import net.ai.gate.chat.stream.ChatEvent;
 import net.ai.gate.chat.tool.FunctionTool;
 import net.ai.gate.chat.tool.ProviderTool;
 import net.ai.gate.chat.tool.ToolChoice;
+import net.ai.gate.error.ErrorCode;
+import net.ai.gate.error.InvalidRequestException;
+import net.ai.gate.error.LlmException;
 import net.ai.gate.error.ProviderException;
 import net.ai.gate.error.RateLimitedException;
 import net.ai.gate.json.Json;
@@ -65,11 +71,19 @@ import net.ai.gate.vendors.openai.OpenAiResponsesOptions;
 /// Usage arrives only with the final response. `input_tokens_details.cached_tokens` is the cache read; the API has no
 /// separate write bucket (writes are input), so writes are `0` where cache details are reported and absent where they
 /// are not. Input tokens are counted by `responses/input_tokens`. Replay keeps text, `call_id`s (not the function
-/// item `id`), reasoning items with their encrypted content (without `status`) and generated images.
+/// item `id`), reasoning items with their encrypted content (without `status`), generated images and compaction items.
+///
+/// Continuation: a stored reply (`OpenAiResponsesOptions.store(true)`) carries its id as a `Continuation`; a call that
+/// continues from it sends `previous_response_id` and only the messages after it (the core trims the history).
+/// The API keeps stored responses for 30 days by default and does not report the expiry; an unknown id fails with
+/// `continuation_expired` (`previous_response_not_found`). Compaction (`POST responses/compact`) returns the next
+/// context window: every item is kept verbatim around the `compaction` item with its `encrypted_content`, so the
+/// window replays exactly as returned. See [compaction](https://developers.openai.com/api/docs/guides/compaction).
 public final class ResponsesCodec implements WireApi {
     public static final ResponsesCodec INSTANCE = new ResponsesCodec();
     private static final String ID = "openai-responses";
     private static final String ENCRYPTED_REASONING = "reasoning.encrypted_content", IMAGE = "image_generation_call";
+    private static final String COMPACTION_OBJECT = "response.compaction", CONTINUATION_EXPIRED_CODE = "previous_response_not_found";
     private static final Pattern REASONING_FAMILY = Pattern.compile("(.*/)?(o[1-9]|gpt-[5-9]).*");
     private static final Pattern NO_CACHE_RETENTION = Pattern.compile("(.*/)?gpt-(5\\.([6-9]|\\d{2,})|[6-9]).*");
     private static final int MIN_OUTPUT = 16;
@@ -84,15 +98,7 @@ public final class ResponsesCodec implements WireApi {
         var extra = o.provider(OpenAiResponsesOptions.class);
         var conversation = request.conversation();
         var level = o.reasoning().orElse(null);
-        var input = new ArrayList<JsonValue>();
-        for (var message : conversation.messages()) {
-            switch (message) {
-                case UserMessage u -> input.add(Json.object("role", "user", "content", u.content().stream().map(ResponsesCodec::inputPart).toList()));
-                case AssistantMessage a -> assistant(a, input);
-                case ToolResultMessage r -> r.results().forEach(x -> input.add(Json.object("type", "function_call_output",
-                        "call_id", x.callId(), "output", output(x))));
-            }
-        }
+        var input = input(conversation);
         boolean store = extra.flatMap(OpenAiResponsesOptions::store).orElse(false);
 
         var body = new LinkedHashMap<String, Object>();
@@ -161,7 +167,7 @@ public final class ResponsesCodec implements WireApi {
             else body.put("prompt_cache_retention", "24h");
         }
         extra.flatMap(OpenAiResponsesOptions::serviceTier).ifPresent(t -> body.put("service_tier", t));
-        extra.flatMap(OpenAiResponsesOptions::previousResponseId).ifPresent(id -> body.put("previous_response_id", id));
+        continuedFrom(o).ifPresent(id -> body.put("previous_response_id", id));
         extra.flatMap(OpenAiResponsesOptions::safetyIdentifier).ifPresent(id -> body.put("safety_identifier", id));
         var call = HttpCall.post("responses", Json.valueOf(body));
         if (compat.streamingOnly()) call = call.withHeader("Accept", "text/event-stream");
@@ -195,6 +201,26 @@ public final class ResponsesCodec implements WireApi {
         };
     }
 
+    /// The `input` items of a conversation.
+    private static List<JsonValue> input(Conversation conversation) {
+        var input = new ArrayList<JsonValue>();
+        for (var message : conversation.messages()) {
+            switch (message) {
+                case UserMessage u -> input.add(Json.object("role", "user", "content", u.content().stream().map(ResponsesCodec::inputPart).toList()));
+                case AssistantMessage a -> assistant(a, input);
+                case ToolResultMessage r -> r.results().forEach(x -> input.add(Json.object("type", "function_call_output",
+                        "call_id", x.callId(), "output", output(x))));
+            }
+        }
+        return input;
+    }
+
+    /// The typed continuation, else the raw `previousResponseId` option.
+    private static Optional<String> continuedFrom(ChatOptions o) {
+        return o.continuation().map(Continuation::opaqueId)
+                .or(() -> o.provider(OpenAiResponsesOptions.class).flatMap(OpenAiResponsesOptions::previousResponseId));
+    }
+
     /// A string when the result is text only.
     private static Object output(ToolResult result) {
         if (result.content().stream().allMatch(Content.Text.class::isInstance)) return result.text();
@@ -225,6 +251,10 @@ public final class ResponsesCodec implements WireApi {
                     flush.run();
                     input.add(item);
                 }
+                case Content.Compaction s when s.providerData() instanceof JsonObject item -> {
+                    flush.run();
+                    input.add(item);
+                }
                 case Content.Image i when i.providerData() instanceof JsonObject item && IMAGE.equals(item.optString("type").orElse(null)) -> {
                     flush.run();
                     input.add(Json.object("type", IMAGE, "id", item.string("id"), "status", item.optString("status").orElse("completed"),
@@ -239,34 +269,68 @@ public final class ResponsesCodec implements WireApi {
     @Override public AssistantMessage decode(HttpReply reply, DecodeContext ctx) {
         var response = (JsonObject) reply.json();
         var b = message(ctx, response);
+        boolean compaction = COMPACTION_OBJECT.equals(response.optString("object").orElse(null));
         for (var item : response.objects("output")) {
-            var part = part(item);
+            var part = compaction ? compacted(item) : part(item);
             if (part != null) b.add(part);
         }
         var message = b.build();
         if (message.stopReason() == StopReason.ERROR) {
             var error = response.object("error");
-            var failure = Codecs.streamError(error.optString("code").orElse("response_failed"),
-                    message.errorMessage().orElse("The response failed"));
+            var failure = failure(error.optString("code").orElse("response_failed"), message.errorMessage().orElse("The response failed"));
             var details = failure.details().toBuilder().partial(message).build();
-            throw failure instanceof RateLimitedException ? new RateLimitedException(details) : new ProviderException(details);
+            throw failure instanceof RateLimitedException ? new RateLimitedException(details)
+                    : failure instanceof InvalidRequestException ? new InvalidRequestException(details) : new ProviderException(details);
         }
         return message;
+    }
+
+    /// An item of a compacted window: the `compaction` item, or any other kept verbatim so that the window replays as
+    /// the API returned it.
+    private static Content compacted(JsonObject item) {
+        var type = item.optString("type").orElse("");
+        return "compaction".equals(type) ? Content.Compaction.of(null, item) : Content.Unknown.of(type.isEmpty() ? "item" : type, item);
+    }
+
+    /// `previous_response_not_found` — the continued response is gone — is `continuation_expired`; the rest as usual.
+    private static LlmException failure(String code, String message) {
+        if (CONTINUATION_EXPIRED_CODE.equals(code))
+            return new InvalidRequestException(LlmException.Details.builder(ErrorCode.CONTINUATION_EXPIRED, message).providerCode(code).build());
+        return Codecs.streamError(code, message);
+    }
+
+    @Override public LlmException.Details decodeError(HttpReply reply, DecodeContext ctx) {
+        var details = WireApi.super.decodeError(reply, ctx);
+        if (!(details.errorBody().orElse(null) instanceof JsonObject body)) return details;
+        var error = body.object("error");
+        if (!CONTINUATION_EXPIRED_CODE.equals(error.optString("code").orElse(null))) return details;
+        return LlmException.Details.builder(ErrorCode.CONTINUATION_EXPIRED, "HTTP " + reply.status() + ": "
+                        + error.optString("message").orElse("the continued response is unknown to the API"))
+                .httpStatus(reply.status()).providerCode(CONTINUATION_EXPIRED_CODE).providerRequestId(details.providerRequestId().orElse(null))
+                .errorBody(body).build();
     }
 
     /// Stop reason, usage and ids of a (final) response object.
     private static AssistantMessage.Builder message(DecodeContext ctx, JsonObject response) {
         boolean calls = response.objects("output").stream().anyMatch(i -> "function_call".equals(i.optString("type").orElse(null)));
         var reason = response.object("incomplete_details").optString("reason").orElse(null);
-        var stop = switch (response.optString("status").orElse("completed")) {
+        var stop = COMPACTION_OBJECT.equals(response.optString("object").orElse(null)) ? StopReason.COMPACTION : switch (response.optString("status").orElse("completed")) {
             case "incomplete" -> "max_output_tokens".equals(reason) ? StopReason.LENGTH
                     : "content_filter".equals(reason) ? StopReason.CONTENT_FILTER : StopReason.of(reason == null ? "incomplete" : reason);
             case "failed", "cancelled" -> StopReason.ERROR;
             default -> calls ? StopReason.TOOL_USE : StopReason.STOP;
         };
-        var b = AssistantMessage.builder(ctx.model().ref(), ID).stopReason(stop).usage(usage(response.object("usage")))
-                .responseId(response.optString("id").orElse(null)).responseModel(response.optString("model").orElse(null));
+        var usage = usage(response.object("usage"));
+        var id = response.optString("id").orElse(null);
+        var b = AssistantMessage.builder(ctx.model().ref(), ID).stopReason(stop).usage(usage)
+                .responseId(id).responseModel(response.optString("model").orElse(null));
         if (stop == StopReason.ERROR) b.errorMessage(response.object("error").optString("message").orElse("The response " + response.optString("status").orElse("")));
+        // a stored response is server-side state the next call can continue from; the API does not report when it expires
+        if (id != null && response.bool("store") && stop != StopReason.ERROR && stop != StopReason.COMPACTION) {
+            var input = usage.totalInput().isPresent() ? usage.totalInput() : usage.input();
+            var history = input.isPresent() && usage.output().isPresent() ? OptionalLong.of(input.getAsLong() + usage.output().getAsLong()) : OptionalLong.empty();
+            b.continuation(new Continuation(ctx.model().ref(), ID, id, Optional.empty(), history));
+        }
         return b;
     }
 
@@ -296,6 +360,7 @@ public final class ResponsesCodec implements WireApi {
                         item.without("encrypted_content").without("status"));
             }
             case "function_call" -> ToolCall.of(item.string("call_id"), item.string("name"), item.optString("arguments").orElse(""));
+            case "compaction" -> Content.Compaction.of(null, item);
             case IMAGE -> item.optString("result").<Content>map(data -> Content.Image.of(new Content.Source.Inline(Base64.getDecoder().decode(data)),
                     "image/" + item.optString("output_format").orElse("png"), null, item.without("result"))).orElseGet(() -> Content.Unknown.of(IMAGE, item));
             case "" -> null;
@@ -339,9 +404,9 @@ public final class ResponsesCodec implements WireApi {
                     case "response.completed", "response.incomplete" -> List.of(ChatEvent.Done.of(message(ctx, event.object("response")).build()));
                     case "response.failed" -> {
                         var error = event.object("response").object("error");
-                        throw Codecs.streamError(error.optString("code").orElse("response_failed"), error.optString("message").orElse("no details"));
+                        throw failure(error.optString("code").orElse("response_failed"), error.optString("message").orElse("no details"));
                     }
-                    case "error" -> throw Codecs.streamError(event.optString("code").orElse("error"), event.optString("message").orElse("no details"));
+                    case "error" -> throw failure(event.optString("code").orElse("error"), event.optString("message").orElse("no details"));
                     default -> List.of();
                 };
             }
@@ -358,7 +423,21 @@ public final class ResponsesCodec implements WireApi {
         return new ApiFeatures(ID, compat.maxOutputTokens() ? ApiFeatures.OutputCap.ENFORCED : ApiFeatures.OutputCap.UNSUPPORTED, MIN_OUTPUT,
                 ApiFeatures.PromptCache.AUTOMATIC, 0,
                 NO_CACHE_RETENTION.matcher(ctx.model().id()).matches() ? Set.of(CacheRetention.SHORT) : Set.of(CacheRetention.SHORT, CacheRetention.LONG),
-                compat.streamingOnly(), true, true, Set.of("input", "output", "reasoning", "cache_read", "cache_write"), false, true, true, true);
+                compat.streamingOnly(), true, true, Set.of("input", "output", "reasoning", "cache_read", "cache_write"), false, true, true, true,
+                !compat.streamingOnly());
+    }
+
+    /// `POST responses/compact` with the input as [#encode] sends it, the instructions and the continuation; not on
+    /// streaming-only dialects, which do not document it.
+    @Override public Optional<HttpCall> compactRequest(ApiRequest request, EncodeContext ctx) {
+        var compat = ctx.compat(OpenAiResponsesCompat.defaults());
+        if (compat.streamingOnly()) return Optional.empty();
+        var body = new LinkedHashMap<String, Object>();
+        body.put("model", request.model().id());
+        request.conversation().system().or(compat::defaultInstructions).ifPresent(s -> body.put("instructions", s));
+        body.put("input", input(request.conversation()));
+        continuedFrom(request.options()).ifPresent(id -> body.put("previous_response_id", id));
+        return Optional.of(HttpCall.post("responses/compact", Json.valueOf(body)));
     }
 
     /// `responses/input_tokens` takes the members that make up the prompt.

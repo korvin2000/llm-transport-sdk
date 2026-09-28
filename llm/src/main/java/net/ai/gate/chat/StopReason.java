@@ -11,7 +11,9 @@ public final class StopReason {
 
     public static final StopReason STOP = known("stop"), LENGTH = known("length"), TOOL_USE = known("tool_use"),
             CONTENT_FILTER = known("content_filter"), REFUSAL = known("refusal"), ABORTED = known("aborted"),
-            ERROR = known("error"), OTHER = known("other");
+            ERROR = known("error"), OTHER = known("other"),
+            // the reply is a compaction summary (Llm.compact), not an answer
+            COMPACTION = known("compaction");
 
     private final String raw;
 

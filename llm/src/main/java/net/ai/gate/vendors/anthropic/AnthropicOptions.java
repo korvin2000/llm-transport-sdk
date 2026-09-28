@@ -12,10 +12,11 @@ import org.jspecify.annotations.Nullable;
 public final class AnthropicOptions implements ProviderOptions {
     private final @Nullable Integer thinkingBudget;
     private final List<String> betas;
-    private final @Nullable String apiVersion, metadataUserId;
+    private final @Nullable String apiVersion, metadataUserId, compactionInstructions;
 
     private AnthropicOptions(Builder b) {
         thinkingBudget = b.thinkingBudget; betas = List.copyOf(b.betas); apiVersion = b.apiVersion; metadataUserId = b.metadataUserId;
+        compactionInstructions = b.compactionInstructions;
     }
 
     public static Builder builder() { return new Builder(); }
@@ -29,6 +30,8 @@ public final class AnthropicOptions implements ProviderOptions {
     /// Overrides the codec's revision; reported as `untested_api_version`.
     public Optional<String> apiVersion() { return Optional.ofNullable(apiVersion); }
     public Optional<String> metadataUserId() { return Optional.ofNullable(metadataUserId); }
+    /// Replaces the API's own summarisation prompt on `Llm.compact` (up to 16,384 characters).
+    public Optional<String> compactionInstructions() { return Optional.ofNullable(compactionInstructions); }
 
     @Override public String toString() { return "AnthropicOptions[thinkingBudget=" + thinkingBudget + ", betas=" + betas + "]"; }
 
@@ -36,7 +39,7 @@ public final class AnthropicOptions implements ProviderOptions {
     public static final class Builder {
         private @Nullable Integer thinkingBudget;
         private final List<String> betas = new ArrayList<>();
-        private @Nullable String apiVersion, metadataUserId;
+        private @Nullable String apiVersion, metadataUserId, compactionInstructions;
 
         private Builder() { }
 
@@ -48,6 +51,7 @@ public final class AnthropicOptions implements ProviderOptions {
         public Builder beta(String flag) { betas.add(flag); return this; }
         public Builder apiVersion(String version) { apiVersion = version; return this; }
         public Builder metadataUserId(String id) { metadataUserId = id; return this; }
+        public Builder compactionInstructions(String prompt) { compactionInstructions = prompt; return this; }
         public AnthropicOptions build() { return new AnthropicOptions(this); }
     }
 }

@@ -17,12 +17,14 @@ import org.jetbrains.annotations.ApiStatus;
 /// @param usageMayBePartial usage can arrive before the final frame, so a cut stream may still report it
 /// @param nativeReasoningReplay same-origin reasoning is replayed in its native, verifiable form
 /// @param continuation the API can continue from server-side state instead of the full history
+///        (`AssistantMessage.continuation()`, `ChatOptions.Builder.continueFrom`)
 /// @param hostedTools the API runs provider-hosted tools (search, code execution)
+/// @param compaction the API summarises a history on request (`Llm.compact`) into a part that stands in for it
 @ApiStatus.Experimental
 public record ApiFeatures(String api, OutputCap outputCap, int outputCapMinimum, PromptCache promptCache, int maxCacheMarkers,
                           Set<CacheRetention> retentions, boolean streamingRequired, boolean streamingSupported,
                           boolean parallelToolCallsControllable, Set<String> reportedUsageFields, boolean usageMayBePartial,
-                          boolean nativeReasoningReplay, boolean continuation, boolean hostedTools) {
+                          boolean nativeReasoningReplay, boolean continuation, boolean hostedTools, boolean compaction) {
     public enum OutputCap { ENFORCED, UNSUPPORTED, UNKNOWN }
 
     /// How prompt caching is controlled.
@@ -33,8 +35,17 @@ public record ApiFeatures(String api, OutputCap outputCap, int outputCapMinimum,
         reportedUsageFields = Set.copyOf(reportedUsageFields);
     }
 
+    /// Without the `compaction` fact, which is then `false`.
+    public ApiFeatures(String api, OutputCap outputCap, int outputCapMinimum, PromptCache promptCache, int maxCacheMarkers,
+                       Set<CacheRetention> retentions, boolean streamingRequired, boolean streamingSupported,
+                       boolean parallelToolCallsControllable, Set<String> reportedUsageFields, boolean usageMayBePartial,
+                       boolean nativeReasoningReplay, boolean continuation, boolean hostedTools) {
+        this(api, outputCap, outputCapMinimum, promptCache, maxCacheMarkers, retentions, streamingRequired, streamingSupported,
+                parallelToolCallsControllable, reportedUsageFields, usageMayBePartial, nativeReasoningReplay, continuation, hostedTools, false);
+    }
+
     /// Nothing known beyond the id: no guarantees a host could rely on.
     public static ApiFeatures unknown(String api) {
-        return new ApiFeatures(api, OutputCap.UNKNOWN, 1, PromptCache.NONE, 0, Set.of(), false, true, false, Set.of(), true, false, false, false);
+        return new ApiFeatures(api, OutputCap.UNKNOWN, 1, PromptCache.NONE, 0, Set.of(), false, true, false, Set.of(), true, false, false, false, false);
     }
 }

@@ -66,6 +66,21 @@ class HandoffTest {
     }
 
     @Test
+    void foreignCompactionSummariesArePassedOnAsTheirTextOrOmitted() {
+        var signed = Content.Compaction.of("Summary.", Json.object("type", "compaction", "content", "Summary.", "signature", "s"));
+        var opaque = Content.Compaction.of(null, Json.object("type", "compaction", "encrypted_content", "e"));
+        var conversation = Conversation.of("q").append(fromGpt(signed, opaque, Content.text("450"))).appendUser("more");
+        var notes = new Notes(false, Set.of());
+
+        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, HistoryPolicy.ALLOW_ADAPTATION, notes);
+
+        assertEquals(List.of(Content.text("Summary."), Content.text("450")), ((AssistantMessage) adapted.messages().get(1)).content());
+        assertEquals(2, notes.issues().stream().filter(i -> i.warning().code().equals("history_adapted")).count(), notes.issues().toString());
+        assertThrows(InvalidRequestException.class, () -> Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP,
+                HistoryPolicy.REJECT_LOSSY, new Notes(false, Set.of())));
+    }
+
+    @Test
     void toolCallIdsAreNormalizedForTheTargetApiAndResultsFollow() {
         var call = ToolCall.of("fc_" + "x".repeat(300) + ":1", "read_file", Json.object("path", "a.txt"));
         var conversation = Conversation.of("read").append(fromGpt(call), List.of(ToolResult.of(call, "hello")));

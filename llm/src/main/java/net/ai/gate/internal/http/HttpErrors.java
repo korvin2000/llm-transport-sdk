@@ -90,6 +90,7 @@ public final class HttpErrors {
                     new InvalidResponseException(d, cause);
             case "deadline_exceeded", "stream_idle_timeout" -> new RequestTimeoutException(d, cause);
             case "cancelled" -> new RequestCancelledException(d, cause);
+            case "continuation_expired" -> new InvalidRequestException(d, cause);
             default -> {
                 int status = d.httpStatus().orElse(0);
                 yield status >= 500 ? new ProviderException(d, cause)

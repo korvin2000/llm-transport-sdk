@@ -19,7 +19,7 @@ import org.jspecify.annotations.Nullable;
 /// Sealed, immutable content parts of messages. Media from a [Path] is read when a request is encoded, not before.
 /// Wire-derived: variants may be added in minor releases, and [Unknown] preserves parts no variant models.
 public sealed interface Content permits Content.Text, Content.Image, Content.Document, Content.Audio,
-        Content.Reasoning, Content.Refusal, Content.Unknown, ToolCall, ToolResult {
+        Content.Reasoning, Content.Refusal, Content.Compaction, Content.Unknown, ToolCall, ToolResult {
 
     static Text text(String text) { return new Text(text, List.of()); }
     static Image image(Path file) { return new Image(new Source.Local(file), mediaType(String.valueOf(file.getFileName())), null); }
@@ -170,6 +170,22 @@ public sealed interface Content permits Content.Text, Content.Image, Content.Doc
         @Override public boolean equals(Object o) { return o instanceof Refusal r && text.equals(r.text); }
         @Override public int hashCode() { return text.hashCode(); }
         @Override public String toString() { return "Refusal[" + text + "]"; }
+    }
+
+    /// A provider-made summary that stands in for the messages before it (`Llm.compact`). `text()` is the readable
+    /// summary where the API returns one; `providerData()` is the wire form — signed or encrypted — that replays it
+    /// to its origin, and only there. Other origins receive the text, if any.
+    final class Compaction implements Content {
+        private final @Nullable String text;
+        private final JsonValue providerData;
+        private Compaction(@Nullable String text, JsonValue providerData) { this.text = text; this.providerData = providerData; }
+        /// For codecs and serializers.
+        public static Compaction of(@Nullable String text, JsonValue providerData) { return new Compaction(text, providerData); }
+        public Optional<String> text() { return Optional.ofNullable(text); }
+        public JsonValue providerData() { return providerData; }
+        @Override public boolean equals(Object o) { return o instanceof Compaction c && Objects.equals(text, c.text) && providerData.equals(c.providerData); }
+        @Override public int hashCode() { return Objects.hash(text, providerData); }
+        @Override public String toString() { return "Compaction[" + (text == null ? "no text" : text.length() + " chars") + "]"; }
     }
 
     /// A part no variant models, preserved as received and replayed only to its origin.

@@ -140,6 +140,18 @@ public interface Llm extends AutoCloseable {
     @ApiStatus.Experimental
     List<HistoryIssue> check(Model model, Conversation conversation, ChatOptions options);
 
+    /// Has the provider summarise the conversation into one reply — stop reason `compaction`, a
+    /// `Content.Compaction` part, the summarisation's usage — that stands in for the messages it covers:
+    /// `conversation.withMessages(List.of(summary))` continues from it. Billed like a call. The part replays
+    /// natively to its origin only; other models receive its text, where the API returned any.
+    /// @throws net.ai.gate.error.InvalidRequestException `unsupported_feature` when the API has no compaction
+    ///         (`features(model).compaction()`)
+    @ApiStatus.Experimental
+    AssistantMessage compact(Model model, Conversation conversation, ChatOptions options);
+
+    @ApiStatus.Experimental
+    default AssistantMessage compact(Model model, Conversation conversation) { return compact(model, conversation, ChatOptions.none()); }
+
     /// Staged, non-billable check: configuration → network → authentication → model access.
     default ConnectionReport test(Model model) { return test(model, _ -> { }); }
 

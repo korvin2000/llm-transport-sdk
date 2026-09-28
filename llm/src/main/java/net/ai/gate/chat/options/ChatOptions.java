@@ -20,6 +20,7 @@ import java.util.function.UnaryOperator;
 
 import net.ai.gate.cache.CacheMode;
 import net.ai.gate.cache.CacheRetention;
+import net.ai.gate.chat.Continuation;
 import net.ai.gate.chat.tool.ToolChoice;
 import net.ai.gate.config.FieldDescriptor;
 import net.ai.gate.config.FieldDescriptor.Kind;
@@ -57,6 +58,7 @@ public final class ChatOptions {
     private final @Nullable CacheMode responseCache;
     private final @Nullable Set<String> strictCodes;
     private final @Nullable HistoryPolicy historyPolicy;
+    private final @Nullable Continuation continuation;
     private final @Nullable TimeoutPolicy timeouts;
     private final @Nullable RetryPolicy retry;
     private final @Nullable CancelToken cancel;
@@ -70,7 +72,7 @@ public final class ChatOptions {
         reasoning = b.reasoning; reasoningHandoff = b.reasoningHandoff; toolChoice = b.toolChoice;
         parallelToolCalls = b.parallelToolCalls; strict = b.strict; output = b.output; cacheRetention = b.cacheRetention;
         sessionId = b.sessionId; responseCache = b.responseCache; timeouts = b.timeouts; retry = b.retry; cancel = b.cancel;
-        strictCodes = b.strictCodes == null ? null : Set.copyOf(b.strictCodes); historyPolicy = b.historyPolicy;
+        strictCodes = b.strictCodes == null ? null : Set.copyOf(b.strictCodes); historyPolicy = b.historyPolicy; continuation = b.continuation;
         headers = frozen(b.headers); tags = frozen(b.tags); listeners = List.copyOf(b.listeners);
         providerOptions = frozen(b.providerOptions); payload = b.payload;
     }
@@ -124,6 +126,10 @@ public final class ChatOptions {
     public Optional<Set<String>> strictCodesSetting() { return Optional.ofNullable(strictCodes); }
     /// Default `ALLOW_ADAPTATION`.
     public Optional<HistoryPolicy> historyPolicy() { return Optional.ofNullable(historyPolicy); }
+    /// Server-side state to continue from: only the messages after the continued reply are sent — every message
+    /// when that reply is not in the conversation. Ignored with `continuation_ignored` (an adaptation, so `strict`
+    /// fails) where the target API or provider cannot honour it.
+    public Optional<Continuation> continuation() { return Optional.ofNullable(continuation); }
     // provider-specific and escape hatch
     /// Read only by codecs of the option's API family; inert with `option_not_applicable` elsewhere.
     public <T extends ProviderOptions> Optional<T> provider(Class<T> type) { return Optional.ofNullable(type.cast(providerOptions.get(type))); }
@@ -154,6 +160,7 @@ public final class ChatOptions {
         if (h.responseCache != null) b.responseCache = h.responseCache;
         if (h.strictCodes != null) b.strictCodes = h.strictCodes;
         if (h.historyPolicy != null) b.historyPolicy = h.historyPolicy;
+        if (h.continuation != null) b.continuation = h.continuation;
         if (h.timeouts != null) b.timeouts = b.timeouts == null ? h.timeouts : b.timeouts.overriddenBy(h.timeouts);
         if (h.retry != null) b.retry = b.retry == null ? h.retry : b.retry.overriddenBy(h.retry);
         if (h.cancel != null) b.cancel = h.cancel;
@@ -171,7 +178,7 @@ public final class ChatOptions {
         b.stop = stop == null ? null : new ArrayList<>(stop); b.reasoning = reasoning; b.reasoningHandoff = reasoningHandoff; b.toolChoice = toolChoice;
         b.parallelToolCalls = parallelToolCalls; b.strict = strict; b.output = output; b.cacheRetention = cacheRetention;
         b.sessionId = sessionId; b.responseCache = responseCache; b.timeouts = timeouts; b.retry = retry; b.cancel = cancel;
-        b.strictCodes = strictCodes; b.historyPolicy = historyPolicy;
+        b.strictCodes = strictCodes; b.historyPolicy = historyPolicy; b.continuation = continuation;
         b.headers.putAll(headers); b.tags.putAll(tags); b.listeners.addAll(listeners); b.providerOptions.putAll(providerOptions);
         b.payload = payload;
         return b;
@@ -202,7 +209,8 @@ public final class ChatOptions {
                 .choices(Arrays.stream(values).map(v -> v.name().toLowerCase(Locale.ROOT)).toList()).build();
     }
 
-    /// The canonical JSON form (`ai-gate.options/1`) of the portable members; `cancel`, `listeners` and `payload`
+    /// The canonical JSON form (`ai-gate.options/1`, or the lowest later version whose members it needs) of the
+    /// portable members; `cancel`, `listeners` and `payload`
     /// are operational and omitted.
     /// @throws IllegalArgumentException naming `providerOptions` or `output` when either is not representable
     public JsonObject toJson() { return ChatOptionsJson.write(this); }
@@ -219,6 +227,7 @@ public final class ChatOptions {
         if (cacheRetention != null) parts.add("cacheRetention=" + cacheRetention);
         if (output != null) parts.add("output=" + output);
         if (Boolean.TRUE.equals(strict)) parts.add("strict");
+        if (continuation != null) parts.add("continueFrom=" + continuation.opaqueId());
         if (!tags.isEmpty()) parts.add("tags=" + tags);
         if (!providerOptions.isEmpty()) parts.add("provider=" + providerOptions.values());
         return "ChatOptions[" + String.join(", ", parts) + "]";
@@ -253,6 +262,7 @@ public final class ChatOptions {
         private @Nullable CacheMode responseCache;
         private @Nullable Set<String> strictCodes;
         private @Nullable HistoryPolicy historyPolicy;
+        private @Nullable Continuation continuation;
         private @Nullable TimeoutPolicy timeouts;
         private @Nullable RetryPolicy retry;
         private @Nullable CancelToken cancel;
@@ -321,6 +331,9 @@ public final class ChatOptions {
             return this;
         }
         public Builder historyPolicy(HistoryPolicy policy) { historyPolicy = policy; return this; }
+        /// Continues from the server-side state of an earlier reply (`AssistantMessage.continuation()`); `null`
+        /// clears the handle set in this builder.
+        public Builder continueFrom(@Nullable Continuation handle) { continuation = handle; return this; }
         public Builder provider(ProviderOptions options) { providerOptions.put(options.getClass(), options); return this; }
         public Builder providers(List<? extends ProviderOptions> replaced) { providerOptions.clear(); replaced.forEach(this::provider); return this; }
         public Builder payload(UnaryOperator<JsonObject> edit) { payload = edit; return this; }

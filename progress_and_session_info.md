@@ -338,5 +338,32 @@ Input: `LLM_TRANSPORT_SDK_CHANGES_FOR_ASTROLABE.md` (S-01…S-17). Build: `./gra
 - `ProviderOptions.fields()` not added: provider options have neither a `set(key, raw)` path nor a JSON form.
 - Forms write version 2 only when a new member is present, so older readers keep working.
 
-## Not done (document: P3 / later)
+## Not done in this session (document: P3 / later)
 - S-14 continuation and compaction; S-16 Kotlin coroutine artifact (needs kotlinx-coroutines, a new dependency).
+
+# Session 6 — S-14 continuation and compaction, S-16 Kotlin artifact (2026-09-28)
+
+Wire facts checked online: OpenAI Responses `previous_response_id` (stored replies only, 30-day default retention,
+`previous_response_not_found`), `POST responses/compact` (`object: response.compaction`, `compaction` item with
+`encrypted_content`, the window replays verbatim); Anthropic on-demand compaction (beta `compact-2026-09-04`,
+`compaction: {type: summarize, instructions?}`, one signed `compaction` block, `stop_reason: compaction`,
+`usage.iterations`), threshold compaction (`compact-2026-01-12`, `compaction_delta`). kotlinx-coroutines 1.11.0.
+
+## Done
+- S-14 `Continuation` record (spec signature), `AssistantMessage.continuation()` (Responses sets it when the response
+  says `store: true`; no expiry is reported), `ChatOptions.Builder.continueFrom`; `Engine.resolve` trims the history
+  to what follows the continued reply (all of it when the reply is absent) and adapts `continuation_ignored` for
+  another origin or an API whose `ApiFeatures.continuation()` is false; `ErrorCode.CONTINUATION_EXPIRED` from
+  `previous_response_not_found` (HTTP and stream). Forms: conversation/3, options/3, reply/2.
+- Compaction: `Llm.compact` → `Engine.prepareCompaction` → `WireApi.compactRequest` → `complete()`; `Content.Compaction`
+  (text where the API gives one, `providerData` for exact replay), `StopReason.COMPACTION`, `ApiFeatures.compaction`
+  (a new component with a 14-argument compatibility constructor). Anthropic sums `usage.iterations`; the
+  summary's beta follows its signature. `Handoff`: foreign summaries become their text (`history_adapted`).
+- S-16 `kotlin/` subproject `net.ai.gate:ai-gate-kotlin`: `completeSuspending`, `events` (callbackFlow over a child
+  `CancelToken`), `awaitReply`/`awaitOutcome` (`suspendCancellableCoroutine`, `LlmCall.cancel()` on cancellation).
+
+## Decisions
+- Compaction returns an `AssistantMessage`, not a `Continuation`: both APIs return content that replays inline
+  (a signed block, an encrypted item), not a server-side id. The `Continuation` handle stays for server state.
+- Gemini: no continuation or compaction (`generateContent` has neither; the Interactions API is another wire API).
+- The Codex dialect reports `compaction = false` (undocumented there).

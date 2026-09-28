@@ -8,3 +8,6 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "ai-gate"
+
+include(":ai-gate-kotlin")                                // optional coroutine and Flow adapters; the core stays JDK-only
+project(":ai-gate-kotlin").projectDir = file("kotlin")

@@ -199,6 +199,17 @@ class AgentHostTest {
     }
 
     @Test
+    void compactionIsRefusedBeforeSendingWhereTheApiHasNone() {
+        var fake = FakeProvider.create();
+        try (var llm = Fixtures.runtime(fake.provider())) {
+            assertFalse(llm.features(fake.model()).compaction());
+            var error = assertThrows(InvalidRequestException.class, () -> llm.compact(fake.model(), Conversation.of("hi")));
+            assertEquals(ErrorCode.UNSUPPORTED_FEATURE, error.code());
+            assertEquals(0, fake.sends());
+        }
+    }
+
+    @Test
     void probesEstablishUsageToolsAndCachingByExperiment() {
         var fake = FakeProvider.create()
                 .reply(r -> r.text("OK").usage(10, 1))

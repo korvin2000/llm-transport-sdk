@@ -11,11 +11,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 
 import net.ai.gate.cache.CacheRetention;
 import net.ai.gate.chat.AssistantMessage;
 import net.ai.gate.chat.CacheBreakpoint;
+import net.ai.gate.chat.Continuation;
 import net.ai.gate.chat.Conversation;
 import net.ai.gate.chat.Message;
 import net.ai.gate.chat.StopReason;
@@ -48,13 +50,16 @@ import org.jspecify.annotations.Nullable;
 /// The canonical JSON form of [Conversation]: deterministic member order, absent fields omitted, no file or network
 /// I/O on read. `Message.timestamp()` round-trips through the ISO-8601 `at` member; [ResponseInfo] and `Usage.raw()`
 /// are transient and never appear in this form. A form is written as `ai-gate.conversation/1` unless it uses a
-/// member of version 2 — per-breakpoint retention, incomplete parts, cache-write classes, non-final usage — so older
-/// readers keep reading what they can represent; both versions are read.
+/// member of version 2 — per-breakpoint retention, incomplete parts, cache-write classes, non-final usage — or of
+/// version 3 — a reply's continuation handle, compaction parts — so older readers keep reading what they can
+/// represent; every version is read.
 ///
-/// The archive form of one reply (`ai-gate.reply/1`, [AssistantMessage#toJson()]) is the message's member set plus
-/// `usage.raw` and `info` (without rate limits and raw body).
+/// The archive form of one reply ([AssistantMessage#toJson()]) is the message's member set plus `usage.raw` and
+/// `info` (without rate limits and raw body): `ai-gate.reply/1`, or `ai-gate.reply/2` with a version-3 member.
 public final class ConversationJson {
-    public static final String SCHEMA = "ai-gate.conversation/2", SCHEMA_V1 = "ai-gate.conversation/1", REPLY = "ai-gate.reply/1";
+    public static final String SCHEMA = "ai-gate.conversation/3", SCHEMA_V2 = "ai-gate.conversation/2", SCHEMA_V1 = "ai-gate.conversation/1";
+    public static final String REPLY = "ai-gate.reply/2", REPLY_V1 = "ai-gate.reply/1";
+    private static final Set<String> SCHEMAS = Set.of(SCHEMA, SCHEMA_V2, SCHEMA_V1), REPLIES = Set.of(REPLY, REPLY_V1);
 
     private ConversationJson() { }
 
@@ -62,7 +67,7 @@ public final class ConversationJson {
 
     public static JsonObject write(Conversation c) {
         var json = new LinkedHashMap<String, JsonValue>();
-        json.put("schema", Json.valueOf(needsV2(c) ? SCHEMA : SCHEMA_V1));
+        json.put("schema", Json.valueOf(c.messages().stream().anyMatch(ConversationJson::needsV3) ? SCHEMA : needsV2(c) ? SCHEMA_V2 : SCHEMA_V1));
         c.system().ifPresent(s -> json.put("system", Json.valueOf(s)));
         json.put("tools", JsonArray.of(c.tools().stream().map(ConversationJson::writeTool).toList()));
         json.put("messages", JsonArray.of(c.messages().stream().map(ConversationJson::writeMessage).toList()));
@@ -77,10 +82,15 @@ public final class ConversationJson {
                 m instanceof AssistantMessage a && (!a.complete() || !a.usage().cacheWrites().isEmpty() || !a.usage().finalForCall()));
     }
 
+    /// A continuation handle or a compaction part: members of version 3.
+    private static boolean needsV3(Message m) {
+        return m instanceof AssistantMessage a && (a.continuation().isPresent() || a.content().stream().anyMatch(Content.Compaction.class::isInstance));
+    }
+
     /// The archive form of one reply.
     public static JsonObject writeReply(AssistantMessage a) {
         var json = new LinkedHashMap<String, JsonValue>();
-        json.put("schema", Json.valueOf(REPLY));
+        json.put("schema", Json.valueOf(needsV3(a) ? REPLY : REPLY_V1));
         json.putAll(((JsonObject) writeMessage(a)).members());
         var usage = ((JsonObject) json.get("usage"));
         if (!(a.usage().raw() instanceof JsonNull)) json.put("usage", usage.with("raw", a.usage().raw()));
@@ -116,6 +126,30 @@ public final class ConversationJson {
     }
 
     private static String lower(Enum<?> value) { return value.name().toLowerCase(Locale.ROOT); }
+
+    /// `{model: {provider, id}, api, id, expiresAt?, effectiveHistoryTokens?}`; shared with the options form.
+    public static JsonValue writeContinuation(Continuation c) {
+        var json = new LinkedHashMap<String, JsonValue>();
+        json.put("model", Json.object("provider", c.model().providerId(), "id", c.model().modelId()));
+        json.put("api", Json.valueOf(c.api()));
+        json.put("id", Json.valueOf(c.opaqueId()));
+        c.expiresAt().ifPresent(at -> json.put("expiresAt", Json.valueOf(at)));
+        c.effectiveHistoryTokens().ifPresent(n -> json.put("effectiveHistoryTokens", JsonNumber.of(n)));
+        return JsonObject.of(json);
+    }
+
+    /// Reads [#writeContinuation]'s form.
+    /// @throws IllegalArgumentException naming the JSON path that does not fit
+    public static Continuation readContinuation(JsonObject json, String path) {
+        if (!(member(json, "model", path + ".model") instanceof JsonObject mo)) throw fail(path + ".model", "expected an object");
+        var model = new ModelRef(str(member(mo, "provider", path + ".model.provider"), path + ".model.provider"),
+                str(member(mo, "id", path + ".model.id"), path + ".model.id"));
+        var expiresAt = optString(json, "expiresAt", path);
+        var tokens = optLong(json, "effectiveHistoryTokens", path);
+        return new Continuation(model, str(member(json, "api", path + ".api"), path + ".api"), str(member(json, "id", path + ".id"), path + ".id"),
+                Optional.ofNullable(expiresAt).map(at -> parseInstant(at, path + ".expiresAt")),
+                tokens.isPresent() ? OptionalLong.of(tokens.get()) : OptionalLong.empty());
+    }
 
     private static JsonValue writeTool(Tool tool) {
         var json = new LinkedHashMap<String, JsonValue>();
@@ -153,6 +187,7 @@ public final class ConversationJson {
             a.errorMessage().ifPresent(e -> json.put("errorMessage", Json.valueOf(e)));
             a.responseModel().ifPresent(v -> json.put("responseModel", Json.valueOf(v)));
             a.responseId().ifPresent(v -> json.put("responseId", Json.valueOf(v)));
+            a.continuation().ifPresent(c -> json.put("continuation", writeContinuation(c)));
             json.put("usage", writeUsage(a.usage()));
             json.put("warnings", JsonArray.of(a.warnings().stream()
                     .map(w -> (JsonValue) Json.object("code", w.code(), "message", w.message())).toList()));
@@ -238,6 +273,10 @@ public final class ConversationJson {
         } else if (c instanceof Content.Refusal r) {
             json.put("type", Json.valueOf("refusal"));
             json.put("text", Json.valueOf(r.text()));
+        } else if (c instanceof Content.Compaction s) {
+            json.put("type", Json.valueOf("compaction"));
+            s.text().ifPresent(t -> json.put("text", Json.valueOf(t)));
+            json.put("providerData", s.providerData());
         } else if (c instanceof Content.Unknown u) {
             json.put("type", Json.valueOf("unknown"));
             json.put("name", Json.valueOf(u.type()));
@@ -275,8 +314,8 @@ public final class ConversationJson {
 
     /// @throws IllegalArgumentException naming the JSON path that does not fit
     public static Conversation read(JsonObject json) {
-        if (!(json.get("schema").orElse(null) instanceof JsonString s) || !Set.of(SCHEMA, SCHEMA_V1).contains(s.value()))
-            throw fail("schema", "must be '" + SCHEMA + "' or '" + SCHEMA_V1 + "'");
+        if (!(json.get("schema").orElse(null) instanceof JsonString s) || !SCHEMAS.contains(s.value()))
+            throw fail("schema", "must be one of " + SCHEMAS.stream().sorted().toList());
         var builder = Conversation.builder();
         var system = optString(json, "system", "system");
         if (system != null) builder.system(system);
@@ -290,7 +329,8 @@ public final class ConversationJson {
 
     /// Reads [#writeReply]'s form.
     public static AssistantMessage readReply(JsonObject json) {
-        if (!(json.get("schema").orElse(null) instanceof JsonString s) || !REPLY.equals(s.value())) throw fail("schema", "must be '" + REPLY + "'");
+        if (!(json.get("schema").orElse(null) instanceof JsonString s) || !REPLIES.contains(s.value()))
+            throw fail("schema", "must be one of " + REPLIES.stream().sorted().toList());
         var at = parseInstant(str(member(json, "at", "at"), "at"), "at");
         var reply = readAssistant(json, "reply", at);
         var b = reply.toBuilder();
@@ -402,6 +442,7 @@ public final class ConversationJson {
         if (responseModel != null) builder.responseModel(responseModel);
         var responseId = optString(m, "responseId", path);
         if (responseId != null) builder.responseId(responseId);
+        if (m.get("continuation").orElse(null) instanceof JsonObject continuation) builder.continuation(readContinuation(continuation, path + ".continuation"));
         if (!(member(m, "usage", path + ".usage") instanceof JsonObject usage)) throw fail(path + ".usage", "expected an object");
         builder.usage(readUsage(usage, path + ".usage"));
         if (!(member(m, "warnings", path + ".warnings") instanceof JsonArray warnings)) throw fail(path + ".warnings", "expected an array");
@@ -501,6 +542,7 @@ public final class ConversationJson {
             case "reasoning" -> Content.Reasoning.of(optString(json, "text", path), optString(json, "signature", path),
                     bool(member(json, "redacted", path + ".redacted"), path + ".redacted"), json.get("providerData").orElse(JsonNull.INSTANCE));
             case "refusal" -> Content.Refusal.of(str(member(json, "text", path + ".text"), path + ".text"));
+            case "compaction" -> Content.Compaction.of(optString(json, "text", path), json.get("providerData").orElse(JsonNull.INSTANCE));
             case "unknown" -> Content.Unknown.of(str(member(json, "name", path + ".name"), path + ".name"), member(json, "raw", path + ".raw"));
             case "tool_call" -> ToolCall.of(str(member(json, "id", path + ".id"), path + ".id"), str(member(json, "name", path + ".name"), path + ".name"),
                     str(member(json, "arguments", path + ".arguments"), path + ".arguments"));

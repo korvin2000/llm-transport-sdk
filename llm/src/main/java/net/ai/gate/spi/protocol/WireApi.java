@@ -53,4 +53,9 @@ public interface WireApi {
 
     /// The input tokens in the reply to [#countRequest]; empty when the reply does not state them.
     default OptionalLong countReply(HttpReply reply) { return OptionalLong.empty(); }
+
+    /// The request that has the provider summarise `request.conversation()` (`Llm.compact`) into a reply — stop
+    /// reason `compaction`, a `Content.Compaction` part — that stands in for those messages; [#decode] reads the
+    /// reply. Empty when the API has no compaction (`ApiFeatures.compaction()` is then `false`).
+    default Optional<HttpCall> compactRequest(ApiRequest request, EncodeContext ctx) { return Optional.empty(); }
 }

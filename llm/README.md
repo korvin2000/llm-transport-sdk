@@ -67,20 +67,35 @@ outcome.usage(); outcome.partial(); outcome.cancellation(); outcome.attempts();
 `llm.check(model, conversation, options)` lists what a hand-off would convert; `llm.test(model, t -> t.usageFields()
 .toolRoundTrip().cacheRoundTrip())` establishes it by billable experiment. See [CHANGELOG.md](CHANGELOG.md).
 
+Long sessions continue from server-side state or from a provider-made summary:
+
+```java
+var reply = llm.complete(model, history, stored);                              // Responses: OpenAiResponsesOptions.store(true)
+var next = llm.complete(model, history.append(reply).appendUser("And Spain?"),
+        stored.toBuilder().continueFrom(reply.continuation().orElseThrow()).build());   // sends only what followed the reply
+AssistantMessage summary = llm.compact(model, history);                        // Anthropic and OpenAI; billed like a call
+var compacted = history.withMessages(List.of(summary));                        // the summary stands in for the history
+```
+
+Kotlin hosts add `net.ai.gate:ai-gate-kotlin` (`kotlin/`): `llm.completeSuspending(...)`, `llm.events(...)` as a
+`Flow<ChatEvent>`, and `call.awaitReply()` / `call.awaitOutcome()`; cancelling a coroutine cancels the call and the
+outcome still settles.
+
 ## Build
 
 JDK 26 and Gradle 9.7 (wrapper included; a missing JDK 26 is provisioned by the toolchain resolver).
 
 ```bash
 ./gradlew build
-./gradlew publishToMavenLocal  # net.ai.gate:ai-gate:<version from gradle.properties>, with sources and javadoc
+./gradlew publishToMavenLocal  # net.ai.gate:ai-gate and ai-gate-kotlin:<version from gradle.properties>, with sources and javadoc
 ./gradlew liveTest            # opt-in, billable: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, AI_GATE_CREDENTIALS
 ./gradlew updateModelCatalog  # network: regenerates models.json from models.dev
 ```
 
 `build` compiles with `-Xlint:all -Werror`, runs the Java and Kotlin tests (JUnit 6, ArchUnit), compiles and runs an
 external consumer against the jar on the module path and on the class path, and produces the jar, sources jar and
-Javadoc (Markdown `///` comments). The main artifact has no runtime dependency beyond the JDK; Kotlin is test-only.
+Javadoc (Markdown `///` comments). The main artifact has no runtime dependency beyond the JDK; Kotlin is test-only
+there. The optional `ai-gate-kotlin` subproject (`kotlin/`) depends on the core and on `kotlinx-coroutines-core`.
 
 ## Layout
 
@@ -89,8 +104,8 @@ Packages are grouped by noun, at most 20 top-level types each (enforced). Public
 ```
 net.ai.gate
 ├── Llm, Provider            the runtime facade and the backend it is built from
-├── chat/                    Conversation, the three Message kinds, StopReason
-│   ├── content/             Content parts (text, media, reasoning, refusal, unknown), ToolCall, ToolResult
+├── chat/                    Conversation, the three Message kinds, StopReason, Continuation
+│   ├── content/             Content parts (text, media, reasoning, refusal, compaction, unknown), ToolCall, ToolResult
 │   ├── tool/                Tool, FunctionTool, ProviderTool, ToolChoice
 │   ├── stream/              ChatStream and its sealed ChatEvents
 │   └── options/             ChatOptions (call ▷ provider ▷ runtime), OutputFormat, ReasoningHandoff

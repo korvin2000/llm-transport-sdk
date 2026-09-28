@@ -23,7 +23,9 @@ public final class ErrorCode {
             OUTPUT_INVALID = known("output_invalid"), OUTPUT_TRUNCATED = known("output_truncated"),
             OUTPUT_REFUSED = known("output_refused"), DEADLINE_EXCEEDED = known("deadline_exceeded"),
             STREAM_IDLE_TIMEOUT = known("stream_idle_timeout"), CANCELLED = known("cancelled"),
-            CACHE_MISS = known("cache_miss");
+            CACHE_MISS = known("cache_miss"),
+            // the Continuation a call continued from is unknown to the API: discarded, never stored, or of another project
+            CONTINUATION_EXPIRED = known("continuation_expired");
 
     private final String value;
 

@@ -97,7 +97,8 @@ public final class Conversation {
         return b;
     }
 
-    /// The canonical JSON form (`ai-gate.conversation/1`): deterministic member order, absent fields omitted.
+    /// The canonical JSON form (`ai-gate.conversation/1`, or the lowest later version whose members it needs):
+    /// deterministic member order, absent fields omitted.
     public JsonObject toJson() { return ConversationJson.write(this); }
 
     /// Reads the canonical form; performs no file or network I/O.

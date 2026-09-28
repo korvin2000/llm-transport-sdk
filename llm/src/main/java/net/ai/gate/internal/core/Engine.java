@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
@@ -19,6 +20,7 @@ import net.ai.gate.auth.ResolvedAuth;
 import net.ai.gate.cache.CacheMode;
 import net.ai.gate.cache.ResponseCache;
 import net.ai.gate.chat.AssistantMessage;
+import net.ai.gate.chat.Continuation;
 import net.ai.gate.chat.Conversation;
 import net.ai.gate.chat.HistoryIssue;
 import net.ai.gate.chat.options.ChatOptions;
@@ -87,32 +89,83 @@ final class Engine {
         @Override public String toString() { return "PreparedCall[" + model.ref() + ", " + api.id() + (streaming ? ", streaming" : "") + "]"; }
     }
 
-    Prepared prepare(Model model, Conversation conversation, ChatOptions callOptions, boolean streaming) {
+    /// What chat and compaction requests share: resolved options, the continuation applied, the history adapted.
+    private record Resolution(Provider provider, WireApi api, ChatOptions options, Conversation conversation, Notes notes, CodecContext context) { }
+
+    private Resolution resolve(Model model, Conversation conversation, ChatOptions callOptions) {
         var provider = core.provider(model.providerId());
         var api = api(provider, model);
         var merged = merged(provider, callOptions);
         var notes = new Notes(merged.strict(), merged.strictCodes());
         var options = Resolver.resolve(model, api, conversation, merged, notes);
-        var adapted = Handoff.adapt(conversation, api, model, options.reasoningHandoff().orElseThrow(),
+        var history = conversation;
+        var continuation = options.continuation().orElse(null);
+        if (continuation != null) {
+            if (!continuation.model().providerId().equals(provider.id()) || !continuation.api().equals(api.id())) {
+                notes.adapt("continuation_ignored", "the continuation belongs to " + continuation.model() + " via " + continuation.api()
+                        + ", not to " + model.ref() + " via " + api.id() + "; the full history is sent");
+                options = options.toBuilder().continueFrom(null).build();
+            } else if (!api.features(new CodecContext(provider, model, notes, core.mapper(), 0)).continuation()) {
+                notes.adapt("continuation_ignored", api.id() + " cannot continue from server-side state; the full history is sent");
+                options = options.toBuilder().continueFrom(null).build();
+            } else {
+                history = continued(conversation, continuation, notes);
+            }
+        }
+        var adapted = Handoff.adapt(history, api, model, options.reasoningHandoff().orElseThrow(),
                 options.historyPolicy().orElse(HistoryPolicy.ALLOW_ADAPTATION), notes);
         var context = new CodecContext(provider, model, notes, core.mapper(), Resolver.estimateTokens(adapted));
         if (adapted.cacheBreakpointsWithRetention().stream().anyMatch(b -> b.retention() != null)
                 && api.features(context).promptCache() != ApiFeatures.PromptCache.EXPLICIT_MARKERS)
             notes.adapt("cache_hint_ignored", api.id() + " has no per-marker cache retention; the call's cacheRetention applies");
+        return new Resolution(provider, api, options, adapted, notes, context);
+    }
+
+    /// The messages after the continued reply — every message when that reply is not in the conversation — without
+    /// explicit cache breakpoints: the server-side state stands for the rest.
+    private static Conversation continued(Conversation conversation, Continuation continuation, Notes notes) {
+        var messages = conversation.messages();
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            if (messages.get(i) instanceof AssistantMessage a && continuation.continues(a)) {
+                notes.note("continuation", (i + 1) + " message(s) up to reply " + continuation.opaqueId() + " are server-side state; "
+                        + (messages.size() - i - 1) + " sent after it");
+                return conversation.withMessages(messages.subList(i + 1, messages.size()));
+            }
+        }
+        notes.note("continuation", "reply " + continuation.opaqueId() + " is not in the conversation; every message is sent after it");
+        return conversation.withMessages(messages);
+    }
+
+    Prepared prepare(Model model, Conversation conversation, ChatOptions callOptions, boolean streaming) {
+        var r = resolve(model, conversation, callOptions);
+        return prepared(r, model, streaming, () -> r.api().encode(new ApiRequest(model, r.conversation(), r.options(), streaming), r.context()));
+    }
+
+    /// The API's compaction request, as a non-streaming call whose reply is the summary.
+    Prepared prepareCompaction(Model model, Conversation conversation, ChatOptions callOptions) {
+        var r = resolve(model, conversation, callOptions);
+        return prepared(r, model, false, () -> r.api().compactRequest(new ApiRequest(model, r.conversation(), r.options(), false), r.context())
+                .orElseThrow(() -> new InvalidRequestException(LlmException.Details.builder(ErrorCode.UNSUPPORTED_FEATURE,
+                        r.api().id() + " has no compaction (Llm.features(model).compaction() is false): " + model.ref() + " cannot summarise a history")
+                        .providerId(r.provider().id()).build())));
+    }
+
+    private Prepared prepared(Resolution r, Model model, boolean streaming, Supplier<HttpCall> encode) {
+        var options = r.options();
         HttpCall call;
         try {
-            call = api.encode(new ApiRequest(model, adapted, options, streaming), context);
+            call = encode.get();
         } catch (LlmException | UnsupportedOperationException e) {
             throw e;
         } catch (RuntimeException e) {
             throw new InvalidRequestException(LlmException.Details.builder(ErrorCode.INVALID_REQUEST,
-                    api.id() + " cannot encode the request: " + e.getMessage()).providerId(provider.id()).build(), e);
+                    r.api().id() + " cannot encode the request: " + e.getMessage()).providerId(r.provider().id()).build(), e);
         }
         if (options.payload().isPresent()) call = call.withBody(edited(call, options.payload().get()));
-        var limit = context.outputLimit();
+        var limit = r.context().outputLimit();
         if (limit.isPresent() && !limit.equals(options.maxTokens())) options = options.toBuilder().maxTokens(limit.getAsInt()).build();
-        notes.prepared();
-        return new Prepared(provider, api, model, options, adapted, streaming, call, notes, context);
+        r.notes().prepared();
+        return new Prepared(r.provider(), r.api(), model, options, r.conversation(), streaming, call, r.notes(), r.context());
     }
 
     private WireApi api(Provider provider, Model model) {

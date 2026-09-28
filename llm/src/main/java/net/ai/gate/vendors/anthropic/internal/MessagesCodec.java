@@ -62,9 +62,15 @@ import net.ai.gate.vendors.anthropic.AnthropicOptions;
 /// message — and a 1-hour marker may not follow a 5-minute one.
 ///
 /// Usage: `message_start` and `message_delta` usage arrive as `UsageUpdate`s; cache writes are split into the 5-minute
-/// and 1-hour classes when `cache_creation` reports them; absent counters stay absent. Input tokens are counted by
-/// `messages/count_tokens`. Replay keeps text, signed and redacted thinking, tool use and unknown blocks; citations
-/// replay as plain text.
+/// and 1-hour classes when `cache_creation` reports them; absent counters stay absent; where `usage.iterations`
+/// reports the summarisation and message calls of a compaction, the buckets are their sums. Input tokens are
+/// counted by `messages/count_tokens`. Replay keeps text, signed and redacted thinking, tool use, compaction and
+/// unknown blocks; citations replay as plain text.
+///
+/// Compaction on demand (`compaction: {type: summarize}` under the `compact-2026-09-04` beta) answers with one signed
+/// `compaction` block and `stop_reason: compaction`; it replays first in `messages`, verbatim, under the same beta.
+/// A block without a signature comes from threshold compaction (`compact-2026-01-12`) and replays under that beta.
+/// See [compaction on demand](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand).
 ///
 /// Citations cover their whole text block (`0..length`); document citations have no URL and point at
 /// `document:<index>`, search results without one at `search-result:<index>`. Cited text replays as plain text.
@@ -76,6 +82,7 @@ public final class MessagesCodec implements WireApi {
     private static final Pattern BUDGET_MODELS = Pattern.compile("claude-3.*|claude-(opus|sonnet|haiku)-4(-[0-5])?(-\\d{8})?");
     private static final Pattern NO_FORCED_TOOLS = Pattern.compile("claude-(opus-5-5|fable-5-1|mythos-5-1).*");
     private static final int MAX_CACHE_MARKERS = 4, ANSWER_ROOM = 4096, FALLBACK_MAX_TOKENS = 8192;
+    private static final String COMPACT_BETA = "compact-2026-09-04", COMPACT_THRESHOLD_BETA = "compact-2026-01-12";
     /// Hosted tool name → wire type and name, with the beta it needs.
     private static final Map<String, List<String>> HOSTED = Map.of(
             "web_search", List.of("web_search_20250305", "web_search", ""),
@@ -94,7 +101,16 @@ public final class MessagesCodec implements WireApi {
     /// Blocks stay mutable until cache markers are placed.
     private record Turn(String role, List<JsonObject> blocks) { }
 
-    @Override public HttpCall encode(ApiRequest request, EncodeContext ctx) {
+    @Override public HttpCall encode(ApiRequest request, EncodeContext ctx) { return request(request, ctx, false); }
+
+    /// `POST messages` with `compaction: {type: summarize}` under the `compact-2026-09-04` beta. What the API rejects
+    /// on a summarisation call — stop sequences, a forced tool, an output format, streaming — is left out with a
+    /// warning. Empty for endpoints without beta headers.
+    @Override public Optional<HttpCall> compactRequest(ApiRequest request, EncodeContext ctx) {
+        return ctx.compat(AnthropicCompat.defaults()).betaHeaders() ? Optional.of(request(request, ctx, true)) : Optional.empty();
+    }
+
+    private HttpCall request(ApiRequest request, EncodeContext ctx, boolean compaction) {
         var compat = ctx.compat(AnthropicCompat.defaults());
         var o = request.options();
         var extra = o.provider(AnthropicOptions.class);
@@ -111,6 +127,9 @@ public final class MessagesCodec implements WireApi {
                 case ToolResultMessage r -> new Turn("user", new ArrayList<>(r.results().stream().map(MessagesCodec::result).toList()));
             });
         }
+        for (var message : conversation.messages())   // a summary replays under the beta that produced it
+            if (message instanceof AssistantMessage a) a.compaction().ifPresent(s -> betas.add(
+                    s.providerData() instanceof JsonObject raw && raw.optString("signature").isPresent() ? COMPACT_BETA : COMPACT_THRESHOLD_BETA));
         var tools = new ArrayList<JsonObject>();
         for (var tool : conversation.tools()) {
             switch (tool) {
@@ -138,8 +157,11 @@ public final class MessagesCodec implements WireApi {
         ctx.outputLimit(maxTokens);
         if (!system.isEmpty()) body.put("system", system);
         body.put("messages", turns.stream().map(t -> Json.object("role", t.role(), "content", t.blocks())).toList());
-        if (request.streaming()) body.put("stream", true);
-        if (!o.stop().isEmpty()) body.put("stop_sequences", o.stop());
+        if (request.streaming() && !compaction) body.put("stream", true);
+        if (!o.stop().isEmpty()) {
+            if (compaction) ctx.warn(new Warning("option_dropped", "stop sequences do not apply to a compaction request; they were not sent"));
+            else body.put("stop_sequences", o.stop());
+        }
 
         var outputConfig = new LinkedHashMap<String, Object>();
         var level = o.reasoning().filter(l -> l != ReasoningLevel.OFF).orElse(null);
@@ -187,6 +209,10 @@ public final class MessagesCodec implements WireApi {
         if (!tools.isEmpty()) {
             body.put("tools", tools);
             var requested = o.toolChoice().orElse(null);
+            if (compaction && (requested instanceof ToolChoice.Required || requested instanceof ToolChoice.Only)) {
+                ctx.warn(new Warning("option_dropped", "a forced tool does not apply to a compaction request; tool_choice was not sent"));
+                requested = null;
+            }
             if ((requested instanceof ToolChoice.Required || requested instanceof ToolChoice.Only)
                     && (thinking && !adaptive || NO_FORCED_TOOLS.matcher(request.model().id()).matches())) {
                 ctx.adapt(new Warning("option_adapted", "tool_choice " + (requested instanceof ToolChoice.Only only ? only.toolName() : "required") + " → auto: " + request.model().id() + " cannot force a tool"
@@ -204,11 +230,21 @@ public final class MessagesCodec implements WireApi {
             choice.ifPresent(c -> body.put("tool_choice", c));
         }
         o.output().ifPresent(format -> {
+            if (compaction) {
+                if (!(format instanceof OutputFormat.PlainText))
+                    ctx.warn(new Warning("option_dropped", "an output format does not apply to a compaction request; it was not sent"));
+                return;
+            }
             if (format instanceof OutputFormat.AnyJson)
                 ctx.adapt(new Warning("option_dropped", "the Messages API has no JSON mode; use a schema for structured output"));
             Codecs.schema(format, ctx.json()).ifPresent(s -> outputConfig.put("format", Json.object("type", "json_schema", "schema", s.schema().asJson())));
         });
         if (!outputConfig.isEmpty()) body.put("output_config", outputConfig);
+        if (compaction) {
+            var summarize = Json.object("type", "summarize");
+            body.put("compaction", extra.flatMap(AnthropicOptions::compactionInstructions).map(i -> summarize.with("instructions", i)).orElse(summarize));
+            betas.add(COMPACT_BETA);
+        }
         extra.flatMap(AnthropicOptions::metadataUserId).ifPresent(id -> body.put("metadata", Json.object("user_id", id)));
 
         var version = extra.flatMap(AnthropicOptions::apiVersion).orElse(REVISION);
@@ -304,6 +340,7 @@ public final class MessagesCodec implements WireApi {
                 case Content.Reasoning r when r.signature().isPresent() ->
                         blocks.add(Json.object("type", "thinking", "thinking", r.text().orElse(""), "signature", r.signature().get()));
                 case ToolCall c -> blocks.add(Json.object("type", "tool_use", "id", c.id(), "name", c.name(), "input", input(c)));
+                case Content.Compaction s when s.providerData() instanceof JsonObject raw -> blocks.add(raw);
                 case Content.Unknown u when u.raw() instanceof JsonObject raw -> blocks.add(raw);
                 default -> { }   // unsigned reasoning cannot be replayed; media has no assistant form
             }
@@ -343,6 +380,7 @@ public final class MessagesCodec implements WireApi {
             case "redacted_thinking" -> Content.Reasoning.of(null, block.optString("data").orElse(null), true, JsonNull.INSTANCE);
             case "tool_use" -> inputJson != null ? ToolCall.of(block.string("id"), block.string("name"), inputJson)
                                                  : ToolCall.of(block.string("id"), block.string("name"), block.object("input"));
+            case "compaction" -> Content.Compaction.of(block.optString("content").orElse(null), block);   // replayed as returned
             default -> Content.Unknown.of(block.optString("type").orElse("unknown"),
                     inputJson == null || inputJson.isBlank() ? block : block.with("input", Json.parse(inputJson)));
         };
@@ -366,22 +404,37 @@ public final class MessagesCodec implements WireApi {
             case "max_tokens", "model_context_window_exceeded" -> StopReason.LENGTH;
             case "tool_use" -> StopReason.TOOL_USE;
             case "refusal" -> StopReason.REFUSAL;
+            case "compaction" -> StopReason.COMPACTION;
             default -> StopReason.of(reason);
         };
     }
 
-    /// `input_tokens` already excludes cache reads and writes; `cache_creation` splits writes by TTL.
+    /// `input_tokens` already excludes cache reads and writes; `cache_creation` splits writes by TTL. With
+    /// `iterations` (compaction), the top-level counters leave the summarisation out: every bucket is the sum over
+    /// the iterations that report it.
     private static Usage usage(JsonObject u) {
         if (u.isEmpty()) return Usage.empty();
         var b = Usage.builder().raw(u);
-        u.optLong("input_tokens").ifPresent(b::input);
-        u.optLong("cache_read_input_tokens").ifPresent(b::cacheRead);
-        u.optLong("cache_creation_input_tokens").ifPresent(b::cacheWrite);
+        var iterations = u.objects("iterations");
+        summed(iterations, u, "input_tokens").ifPresent(b::input);
+        summed(iterations, u, "cache_read_input_tokens").ifPresent(b::cacheRead);
+        summed(iterations, u, "cache_creation_input_tokens").ifPresent(b::cacheWrite);
+        summed(iterations, u, "output_tokens").ifPresent(b::output);
         var classes = u.object("cache_creation");
         classes.optLong("ephemeral_5m_input_tokens").ifPresent(n -> b.cacheWrite(CacheRetention.SHORT, n));
         classes.optLong("ephemeral_1h_input_tokens").ifPresent(n -> b.cacheWrite(CacheRetention.LONG, n));
-        u.optLong("output_tokens").ifPresent(b::output);
         return b.build();
+    }
+
+    /// The bucket summed over the iterations that report it, else the top-level counter.
+    private static OptionalLong summed(List<JsonObject> iterations, JsonObject usage, String bucket) {
+        long sum = 0;
+        boolean reported = false;
+        for (var iteration : iterations) {
+            var value = iteration.optLong(bucket);
+            if (value.isPresent()) { sum += value.getAsLong(); reported = true; }
+        }
+        return reported ? OptionalLong.of(sum) : usage.optLong(bucket);
     }
 
     @Override public StreamDecoder streamDecoder(DecodeContext ctx) {
@@ -458,6 +511,10 @@ public final class MessagesCodec implements WireApi {
                         if (block != null) block.start = block.start.with("signature", delta.string("signature"));
                         yield List.of();
                     }
+                    case "compaction_delta" -> {   // threshold compaction streams the whole summary in one delta
+                        if (block != null) block.start = block.start.with("content", delta.string("content"));
+                        yield List.of();
+                    }
                     case "input_json_delta" -> {
                         if (block != null && "tool_use".equals(block.start.optString("type").orElse(null)))
                             yield List.of(new ChatEvent.ToolCallDelta(index, delta.string("partial_json"), Json.object()));
@@ -478,10 +535,11 @@ public final class MessagesCodec implements WireApi {
     @Override public String normalizeToolCallId(String foreignId) { return Codecs.toolCallId(foreignId, 64); }
 
     @Override public ApiFeatures features(DecodeContext ctx) {
-        var ttl = ctx.compat(AnthropicCompat.defaults()).cacheTtl();
+        var compat = ctx.compat(AnthropicCompat.defaults());
         return new ApiFeatures(ID, ApiFeatures.OutputCap.ENFORCED, 1, ApiFeatures.PromptCache.EXPLICIT_MARKERS, MAX_CACHE_MARKERS,
-                ttl ? Set.of(CacheRetention.SHORT, CacheRetention.LONG) : Set.of(CacheRetention.SHORT), false, true, true,
-                Set.of("input", "output", "cache_read", "cache_write", "cache_write_5m", "cache_write_1h"), true, true, false, true);
+                compat.cacheTtl() ? Set.of(CacheRetention.SHORT, CacheRetention.LONG) : Set.of(CacheRetention.SHORT), false, true, true,
+                Set.of("input", "output", "cache_read", "cache_write", "cache_write_5m", "cache_write_1h"), true, true, false, true,
+                compat.betaHeaders());
     }
 
     /// `messages/count_tokens` takes the members that make up the prompt, with the same version and beta headers.
