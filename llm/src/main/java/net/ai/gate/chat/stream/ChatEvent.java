@@ -7,6 +7,7 @@ import net.ai.gate.chat.content.Content;
 import net.ai.gate.chat.content.ToolCall;
 import net.ai.gate.json.JsonObject;
 import net.ai.gate.json.JsonValue;
+import net.ai.gate.metadata.Usage;
 import org.jspecify.annotations.Nullable;
 
 /// Sealed stream events. Deltas and part ends are frozen record shapes; lifecycle events are classes that may gain
@@ -28,6 +29,10 @@ public sealed interface ChatEvent {
 
     /// An event no variant models, preserved as received.
     record Unknown(String type, JsonValue raw) implements ChatEvent { }
+
+    /// Usage reported before the end of the stream (`finalForCall() == false`); the last one is what a partial reply
+    /// carries. `Done` stays authoritative: its usage is the call's, never a sum of updates.
+    record UsageUpdate(Usage observed) implements ChatEvent { }
 
     /// The response began; ids where the API reports them.
     final class Started implements ChatEvent {

@@ -1,6 +1,7 @@
 package net.ai.gate.internal.core;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
@@ -8,6 +9,7 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 
 import net.ai.gate.Llm;
+import net.ai.gate.LlmCall;
 import net.ai.gate.Provider;
 import net.ai.gate.auth.Auth;
 import net.ai.gate.auth.AuthStatus;
@@ -15,6 +17,7 @@ import net.ai.gate.auth.CredentialStore;
 import net.ai.gate.catalog.ModelCatalog;
 import net.ai.gate.chat.AssistantMessage;
 import net.ai.gate.chat.Conversation;
+import net.ai.gate.chat.HistoryIssue;
 import net.ai.gate.chat.StopReason;
 import net.ai.gate.chat.options.ChatOptions;
 import net.ai.gate.chat.stream.ChatStream;
@@ -22,6 +25,7 @@ import net.ai.gate.config.RetryPolicy;
 import net.ai.gate.config.TimeoutPolicy;
 import net.ai.gate.diagnostics.ConnectionReport;
 import net.ai.gate.diagnostics.ConnectionTest;
+import net.ai.gate.diagnostics.PreparedCall;
 import net.ai.gate.diagnostics.PreparedRequest;
 import net.ai.gate.error.ErrorCode;
 import net.ai.gate.error.InvalidResponseException;
@@ -37,10 +41,12 @@ import net.ai.gate.json.JsonObject;
 import net.ai.gate.json.JsonValue;
 import net.ai.gate.lifecycle.CancelToken;
 import net.ai.gate.lifecycle.Registration;
+import net.ai.gate.metadata.TokenCount;
 import net.ai.gate.model.Model;
 import net.ai.gate.spi.catalog.CatalogFeed;
 import net.ai.gate.spi.http.HttpCall;
 import net.ai.gate.spi.http.HttpReply;
+import net.ai.gate.spi.protocol.ApiFeatures;
 import net.ai.gate.spi.protocol.WireApi;
 import net.ai.gate.spi.provider.ProviderApi;
 import net.ai.gate.spi.provider.ProviderApiContext;
@@ -112,9 +118,37 @@ public final class DefaultLlm implements Llm {
         return engine.stream(engine.prepare(model, conversation, options, true), store);
     }
 
+    @Override public LlmCall start(Model model, Conversation conversation, ChatOptions options) {
+        var engine = core.engine();
+        return engine.start(engine.prepare(model, conversation, options, true), store);
+    }
+
+    @Override public LlmCall start(PreparedCall prepared) { return core.engine().start(own(prepared).execution(), store); }
+
+    @Override public AssistantMessage complete(PreparedCall prepared) { return core.engine().complete(own(prepared).execution(), store); }
+
+    @Override public PreparedCall prepare(Model model, Conversation conversation, ChatOptions options, boolean streaming) {
+        return core.engine().prepare(model, conversation, options, streaming);
+    }
+
     @Override public PreparedRequest preview(Model model, Conversation conversation, ChatOptions options) {
         core.checkOpen();
         return core.engine().preview(model, conversation, options);
+    }
+
+    @Override public ApiFeatures features(Model model) { return core.engine().features(model); }
+
+    @Override public TokenCount countTokens(PreparedCall prepared) { return core.engine().countTokens(own(prepared), store); }
+
+    @Override public List<HistoryIssue> check(Model model, Conversation conversation, ChatOptions options) {
+        return core.engine().check(model, conversation, options);
+    }
+
+    /// A call this runtime prepared: its provider is one of the runtime's own.
+    private Engine.Prepared own(PreparedCall prepared) {
+        core.checkOpen();
+        if (prepared instanceof Engine.Prepared p && core.providers().get(p.provider().id()) == p.provider()) return p;
+        throw new IllegalArgumentException(prepared + " was not prepared by this runtime");
     }
 
     @Override public ConnectionReport test(Model model, Consumer<ConnectionTest.Builder> options) {
@@ -167,6 +201,8 @@ public final class DefaultLlm implements Llm {
         o.cacheRetention().ifPresent(v -> json.put("cacheRetention", Json.valueOf(v)));
         o.sessionId().ifPresent(v -> json.put("sessionId", Json.valueOf(v)));
         o.responseCache().ifPresent(v -> json.put("responseCache", Json.valueOf(v)));
+        if (!o.strictCodes().isEmpty()) json.put("strictCodes", Json.valueOf(o.strictCodes().stream().sorted().toList()));
+        o.historyPolicy().ifPresent(v -> json.put("historyPolicy", Json.valueOf(v)));
         var timeouts = o.timeouts().orElse(TimeoutPolicy.defaults());
         json.put("timeouts", Json.object("connect", timeouts.connect(), "streamIdle", timeouts.streamIdle(), "total", timeouts.total().orElse(null)));
         var retry = o.retry().orElse(RetryPolicy.defaults());

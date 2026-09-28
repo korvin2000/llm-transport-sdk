@@ -48,12 +48,32 @@ the access token as `chatgpt-account-id`. OpenAI may change or restrict any of i
 `RateLimitedException` (`quota_exhausted`). Claude Pro/Max subscriptions are deliberately not supported — Anthropic
 limits them to its own applications; use an API key.
 
+### Agent hosts (experimental)
+
+Hosts that admit, bill and cancel calls themselves prepare a call once, inspect and count exactly what will be sent,
+then start it; the outcome survives cancellation and carries the partial reply, the usage observed so far and every
+attempt:
+
+```java
+PreparedCall prepared = llm.prepare(model, conversation, options, true);        // no I/O; strict adaptations fail here
+TokenCount input = llm.countTokens(prepared);                                   // provider endpoint, tokenizer or estimate
+int reserved = prepared.effectiveOptions().maxTokens().orElseThrow();           // the limit on the wire
+LlmCall call = llm.start(prepared);                                             // returns at once
+CallOutcome outcome = call.outcome().toCompletableFuture().join();              // also after call.cancel()
+outcome.usage(); outcome.partial(); outcome.cancellation(); outcome.attempts();
+```
+
+`llm.features(model)` states what the API does with requests (output cap, prompt caching, usage reporting);
+`llm.check(model, conversation, options)` lists what a hand-off would convert; `llm.test(model, t -> t.usageFields()
+.toolRoundTrip().cacheRoundTrip())` establishes it by billable experiment. See [CHANGELOG.md](CHANGELOG.md).
+
 ## Build
 
 JDK 26 and Gradle 9.7 (wrapper included; a missing JDK 26 is provisioned by the toolchain resolver).
 
 ```bash
 ./gradlew build
+./gradlew publishToMavenLocal  # net.ai.gate:ai-gate:<version from gradle.properties>, with sources and javadoc
 ./gradlew liveTest            # opt-in, billable: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, AI_GATE_CREDENTIALS
 ./gradlew updateModelCatalog  # network: regenerates models.json from models.dev
 ```

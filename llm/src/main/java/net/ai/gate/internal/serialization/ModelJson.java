@@ -98,6 +98,7 @@ public final class ModelJson {
         p.outputPerMillion().ifPresent(v -> json.put("output", JsonNumber.of(v)));
         p.cacheReadPerMillion().ifPresent(v -> json.put("cacheRead", JsonNumber.of(v)));
         p.cacheWritePerMillion().ifPresent(v -> json.put("cacheWrite", JsonNumber.of(v)));
+        p.cacheWriteLongPerMillion().ifPresent(v -> json.put("cacheWriteLong", JsonNumber.of(v)));
         if (!p.tiers().isEmpty())
             json.put("tiers", JsonArray.of(p.tiers().stream().map(t -> prices(t.prices()).with("above", t.inputTokensAbove())).toList()));
         return JsonObject.of(json);
@@ -109,6 +110,7 @@ public final class ModelJson {
         number(json, "output").ifPresent(b::output);
         number(json, "cacheRead").ifPresent(b::cacheRead);
         number(json, "cacheWrite").ifPresent(b::cacheWrite);
+        number(json, "cacheWriteLong").ifPresent(b::cacheWriteLong);
         if (json.get("tiers").orElse(null) instanceof JsonArray tiers)
             for (int i = 0; i < tiers.values().size(); i++) {
                 var tierPath = path + ".tiers[" + i + "]";

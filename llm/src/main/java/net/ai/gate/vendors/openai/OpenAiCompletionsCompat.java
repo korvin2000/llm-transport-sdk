@@ -1,5 +1,8 @@
 package net.ai.gate.vendors.openai;
 
+import java.util.List;
+
+import net.ai.gate.config.FieldDescriptor;
 import net.ai.gate.json.JsonObject;
 import net.ai.gate.spi.protocol.ApiCompat;
 import org.jspecify.annotations.Nullable;
@@ -90,6 +93,19 @@ public final class OpenAiCompletionsCompat implements ApiCompat {
         return ApiCompat.json("maxTokensField", maxTokensField, "developerRole", developerRole, "streamUsage", streamUsage,
                 "strictTools", strictTools, "reasoningContentReplay", reasoningContentReplay, "reasoningFormat", reasoningFormat,
                 "cacheControl", cacheControl, "sessionHeader", sessionHeader, "toolCallIdFormat", toolCallIdFormat);
+    }
+
+    @Override public List<FieldDescriptor> fields() {
+        return List.of(FieldDescriptor.builder("maxTokensField", FieldDescriptor.Kind.CHOICE).label("Output limit field").group("Compatibility")
+                        .choices(List.of("max_completion_tokens", "max_tokens")).defaultValue("max_completion_tokens").build(),
+                ApiCompat.flagField("developerRole", "Developer role", true, "System instructions as a developer message"),
+                ApiCompat.flagField("streamUsage", "Stream usage", true, "Request usage in the final stream chunk"),
+                ApiCompat.flagField("strictTools", "Strict tools", true, "Strict JSON Schema on function tools"),
+                ApiCompat.flagField("reasoningContentReplay", "Replay reasoning", false, "Send prior reasoning_content back on assistant turns"),
+                ApiCompat.choiceField("reasoningFormat", "Reasoning format", ReasoningFormat.OPENAI, "How reasoning is requested and returned"),
+                ApiCompat.choiceField("cacheControl", "Cache markers", CacheControl.NONE, "Anthropic-style cache_control on messages"),
+                ApiCompat.choiceField("sessionHeader", "Session header", SessionHeader.NONE, "How the session id is sent"),
+                ApiCompat.choiceField("toolCallIdFormat", "Tool-call ids", ToolCallIdFormat.ANY, "Id format the endpoint requires"));
     }
 
     public Builder toBuilder() {

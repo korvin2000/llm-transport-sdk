@@ -158,6 +158,7 @@ final class FakeServer implements HttpTransport {
         }
         var frames = new ArrayList<String>();
         frames.add(frame("start", Json.object("id", id, "model", model)));
+        frames.add(frame("usage", Json.object("input", usage.input().orElse(0))));   // as providers report input up front
         for (int i = 0; i < reply.parts().size(); i++) {
             var part = reply.parts().get(i);
             int index = i;

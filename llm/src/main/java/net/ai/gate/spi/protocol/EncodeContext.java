@@ -27,4 +27,8 @@ public interface EncodeContext {
     /// The output limit to send when the API requires one and the call set none: the model's maximum clamped to the
     /// context window minus the estimated input. Reported as a preview note when used.
     OptionalInt defaultMaxTokens();
+
+    /// The output limit the encoded request carries, when it differs from the call's `maxTokens` or the call set none
+    /// (a default, a raise above a thinking budget, an API minimum): reported as the prepared call's effective option.
+    default void outputLimit(int tokens) { }
 }

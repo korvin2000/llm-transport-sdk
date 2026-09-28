@@ -1,5 +1,6 @@
 package net.ai.gate.chat.options;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -12,6 +13,7 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
@@ -19,6 +21,8 @@ import java.util.function.UnaryOperator;
 import net.ai.gate.cache.CacheMode;
 import net.ai.gate.cache.CacheRetention;
 import net.ai.gate.chat.tool.ToolChoice;
+import net.ai.gate.config.FieldDescriptor;
+import net.ai.gate.config.FieldDescriptor.Kind;
 import net.ai.gate.config.RetryPolicy;
 import net.ai.gate.config.TimeoutPolicy;
 import net.ai.gate.event.LlmListener;
@@ -26,6 +30,7 @@ import net.ai.gate.internal.serialization.ChatOptionsJson;
 import net.ai.gate.internal.validation.Checks;
 import net.ai.gate.json.JsonObject;
 import net.ai.gate.lifecycle.CancelToken;
+import net.ai.gate.model.Model;
 import net.ai.gate.model.ReasoningLevel;
 import net.ai.gate.spi.protocol.ProviderOptions;
 import org.jspecify.annotations.Nullable;
@@ -50,6 +55,8 @@ public final class ChatOptions {
     private final @Nullable CacheRetention cacheRetention;
     private final @Nullable String sessionId;
     private final @Nullable CacheMode responseCache;
+    private final @Nullable Set<String> strictCodes;
+    private final @Nullable HistoryPolicy historyPolicy;
     private final @Nullable TimeoutPolicy timeouts;
     private final @Nullable RetryPolicy retry;
     private final @Nullable CancelToken cancel;
@@ -63,6 +70,7 @@ public final class ChatOptions {
         reasoning = b.reasoning; reasoningHandoff = b.reasoningHandoff; toolChoice = b.toolChoice;
         parallelToolCalls = b.parallelToolCalls; strict = b.strict; output = b.output; cacheRetention = b.cacheRetention;
         sessionId = b.sessionId; responseCache = b.responseCache; timeouts = b.timeouts; retry = b.retry; cancel = b.cancel;
+        strictCodes = b.strictCodes == null ? null : Set.copyOf(b.strictCodes); historyPolicy = b.historyPolicy;
         headers = frozen(b.headers); tags = frozen(b.tags); listeners = List.copyOf(b.listeners);
         providerOptions = frozen(b.providerOptions); payload = b.payload;
     }
@@ -109,6 +117,13 @@ public final class ChatOptions {
     public boolean strict() { return Boolean.TRUE.equals(strict); }
     /// Whether `strict` was set explicitly in this scope, and to what. [#strict()] collapses an unset value to `false`.
     public Optional<Boolean> strictSetting() { return Optional.ofNullable(strict); }
+    /// Warning codes that fail the call while it is prepared, even when it is not strict — e.g. `option_adapted` for a
+    /// host that reserves exactly `maxTokens`. Empty when unset.
+    public Set<String> strictCodes() { return strictCodes == null ? Set.of() : strictCodes; }
+    /// The set as given in this scope; absent means unset. A set given in a narrower scope replaces a wider one.
+    public Optional<Set<String>> strictCodesSetting() { return Optional.ofNullable(strictCodes); }
+    /// Default `ALLOW_ADAPTATION`.
+    public Optional<HistoryPolicy> historyPolicy() { return Optional.ofNullable(historyPolicy); }
     // provider-specific and escape hatch
     /// Read only by codecs of the option's API family; inert with `option_not_applicable` elsewhere.
     public <T extends ProviderOptions> Optional<T> provider(Class<T> type) { return Optional.ofNullable(type.cast(providerOptions.get(type))); }
@@ -137,6 +152,8 @@ public final class ChatOptions {
         if (h.cacheRetention != null) b.cacheRetention = h.cacheRetention;
         if (h.sessionId != null) b.sessionId = h.sessionId;
         if (h.responseCache != null) b.responseCache = h.responseCache;
+        if (h.strictCodes != null) b.strictCodes = h.strictCodes;
+        if (h.historyPolicy != null) b.historyPolicy = h.historyPolicy;
         if (h.timeouts != null) b.timeouts = b.timeouts == null ? h.timeouts : b.timeouts.overriddenBy(h.timeouts);
         if (h.retry != null) b.retry = b.retry == null ? h.retry : b.retry.overriddenBy(h.retry);
         if (h.cancel != null) b.cancel = h.cancel;
@@ -154,9 +171,35 @@ public final class ChatOptions {
         b.stop = stop == null ? null : new ArrayList<>(stop); b.reasoning = reasoning; b.reasoningHandoff = reasoningHandoff; b.toolChoice = toolChoice;
         b.parallelToolCalls = parallelToolCalls; b.strict = strict; b.output = output; b.cacheRetention = cacheRetention;
         b.sessionId = sessionId; b.responseCache = responseCache; b.timeouts = timeouts; b.retry = retry; b.cancel = cancel;
+        b.strictCodes = strictCodes; b.historyPolicy = historyPolicy;
         b.headers.putAll(headers); b.tags.putAll(tags); b.listeners.addAll(listeners); b.providerOptions.putAll(providerOptions);
         b.payload = payload;
         return b;
+    }
+
+    /// The form of every value [Builder#set(String, String)] accepts: the model's parameters, then the runtime
+    /// options. Keys match `set`; no I/O.
+    public static List<FieldDescriptor> fields(Model model) {
+        var fields = new ArrayList<>(model.parameters());
+        fields.add(FieldDescriptor.builder("topK", Kind.INTEGER).label("Top K").group("Sampling").range(BigDecimal.ONE, null).build());
+        fields.add(FieldDescriptor.builder("seed", Kind.INTEGER).label("Seed").group("Sampling").build());
+        fields.add(FieldDescriptor.builder("stop", Kind.TEXT).label("Stop sequences").group("Generation").help("Comma-separated").build());
+        fields.add(choice("reasoningHandoff", "Foreign reasoning", "Generation", ReasoningHandoff.values(), ReasoningHandoff.KEEP));
+        fields.add(choice("historyPolicy", "Foreign history", "Generation", HistoryPolicy.values(), HistoryPolicy.ALLOW_ADAPTATION));
+        fields.add(FieldDescriptor.builder("parallelToolCalls", Kind.BOOLEAN).label("Parallel tool calls").group("Tools").build());
+        fields.add(FieldDescriptor.builder("sessionId", Kind.TEXT).label("Session id").group("Caching").help("Cache routing key where the API has one").build());
+        fields.add(choice("responseCache", "Response cache", "Caching", CacheMode.values(), CacheMode.READ_WRITE));
+        fields.add(FieldDescriptor.builder("timeout", Kind.DURATION).label("Total timeout").group("Operation").help("ISO-8601, e.g. PT2M").build());
+        fields.add(FieldDescriptor.builder("strict", Kind.BOOLEAN).label("Strict").group("Operation").defaultValue("false")
+                .help("Fail instead of adapting a setting the model or API cannot honour").build());
+        fields.add(FieldDescriptor.builder("strictCodes", Kind.TEXT).label("Fatal warning codes").group("Operation")
+                .help("Comma-separated, e.g. option_adapted,cache_hint_ignored").build());
+        return List.copyOf(fields);
+    }
+
+    private static FieldDescriptor choice(String key, String label, String group, Enum<?>[] values, Enum<?> defaultValue) {
+        return FieldDescriptor.builder(key, Kind.CHOICE).label(label).group(group).defaultValue(defaultValue.name().toLowerCase(Locale.ROOT))
+                .choices(Arrays.stream(values).map(v -> v.name().toLowerCase(Locale.ROOT)).toList()).build();
     }
 
     /// The canonical JSON form (`ai-gate.options/1`) of the portable members; `cancel`, `listeners` and `payload`
@@ -208,6 +251,8 @@ public final class ChatOptions {
         private @Nullable CacheRetention cacheRetention;
         private @Nullable String sessionId;
         private @Nullable CacheMode responseCache;
+        private @Nullable Set<String> strictCodes;
+        private @Nullable HistoryPolicy historyPolicy;
         private @Nullable TimeoutPolicy timeouts;
         private @Nullable RetryPolicy retry;
         private @Nullable CancelToken cancel;
@@ -269,6 +314,13 @@ public final class ChatOptions {
         public Builder strict() { return strict(true); }
         /// Explicit `false` overrides a strict wider scope.
         public Builder strict(boolean value) { strict = value; return this; }
+        /// Replaces the set; an empty set clears an inherited one.
+        public Builder strictCodes(Set<String> warningCodes) {
+            warningCodes.forEach(code -> Checks.notBlank(code, "Warning code"));
+            strictCodes = Set.copyOf(warningCodes);
+            return this;
+        }
+        public Builder historyPolicy(HistoryPolicy policy) { historyPolicy = policy; return this; }
         public Builder provider(ProviderOptions options) { providerOptions.put(options.getClass(), options); return this; }
         public Builder providers(List<? extends ProviderOptions> replaced) { providerOptions.clear(); replaced.forEach(this::provider); return this; }
         public Builder payload(UnaryOperator<JsonObject> edit) { payload = edit; return this; }
@@ -292,6 +344,8 @@ public final class ChatOptions {
                     case "sessionId" -> sessionId(raw);
                     case "timeout" -> timeouts(t -> t.total(Duration.parse(raw)));
                     case "strict" -> strict(bool(raw));
+                    case "strictCodes" -> strictCodes(Set.copyOf(Arrays.stream(raw.split(",")).map(String::strip).filter(c -> !c.isEmpty()).toList()));
+                    case "historyPolicy" -> historyPolicy(HistoryPolicy.valueOf(raw.strip().toUpperCase(Locale.ROOT)));
                     default -> problems.add(key + ": unknown option");
                 }
             } catch (IllegalArgumentException e) {

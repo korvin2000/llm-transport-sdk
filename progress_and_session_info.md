@@ -298,3 +298,45 @@ tools-image-generation, audio); github.com/openai/codex (codex-rs login server a
 model-provider-info, codex-api headers/api_bridge, models-manager/models.json); api-docs.deepseek.com (thinking mode);
 openrouter.ai/docs (reasoning tokens, prompt caching); console.groq.com/docs/reasoning; docs.x.ai/docs/guides/reasoning;
 Mistral tool-call id reports (zed #53034, vercel/ai #11802); pi-ai `examples/ai` (openai-codex OAuth and transport).
+
+# Session 5 — transport facts for agent hosts (2026-09-28)
+
+Input: `LLM_TRANSPORT_SDK_CHANGES_FOR_ASTROLABE.md` (S-01…S-17). Build: `./gradlew build --offline` green (226 tests,
+3 skipped: live and opt-in); `./gradlew publishToMavenLocal` produces `net.ai.gate:ai-gate:0.1.0-SNAPSHOT`.
+
+## Done
+- S-01 `ChatEvent.UsageUpdate` from Anthropic (`message_start`/`message_delta`), Completions (usage chunk), Gemini
+  (every chunk), fake (`usage` frame); `Usage.finalForCall()`; the accumulator's last update rides on partial replies,
+  which are priced. `Done` stays authoritative.
+- S-02 `Llm.start` → `LlmCall`/`CallOutcome`: the `Call` is created and started on the caller's thread (id, `Started`),
+  runs on the executor; outcome first, then reply. `CallOutcome(requestId, reply, error, attempts)` derives partial,
+  usage, outcomeUnknown and cancellation. `completeAsync` unchanged.
+- S-03 `AssistantMessage.incompleteParts()`: tool calls and reasoning without `PartEnd` in a snapshot; `Handoff` omits
+  them (`incomplete_part_omitted`), `Conversation.append(partial, results)` refuses results for them.
+- S-04 `Usage.cacheWrites()` + `Prices.cacheWriteLong`; Anthropic `cache_creation` classes, `ifPresent` everywhere;
+  OpenAI family: write `0` only where the cache read is reported (writes are input there), else absent. Gemini keeps
+  `0` defaults: proto3 JSON omits zero counters (audited, documented).
+- S-05 `CacheBreakpoint(index, retention)`; Anthropic per-marker `ttl`, 1 h before 5 min (adapt), other APIs:
+  `cache_hint_ignored` via `ApiFeatures.promptCache() != EXPLICIT_MARKERS`.
+- S-06 `ApiFeatures` per codec (Codex: `OutputCap.UNSUPPORTED`), `Llm.features`; probes `USAGE`/`TOOLS`/`CACHE`.
+- S-07 `Engine.Prepared` implements `PreparedCall`; each execution copies notes/context; digest = `Exchange.key`.
+- S-08 adapt (strict fails): thinking `max_tokens` raise, extra markers, `LONG` fallbacks (Anthropic, Responses);
+  `strictCodes` in `Notes` while preparing only; `EncodeContext.outputLimit` → `effectiveOptions().maxTokens()`.
+- S-09 `WireApi.countRequest/countReply` (Anthropic, Responses, Gemini); 404/405/501 fall back; `Tokenizer` SPI.
+- S-10 `ToolResult.of(callId, toolName, parts, error)`. S-11 attempt ledger in `Call`.
+- S-12 `HistoryPolicy`, `HistoryIssue` (a new record: `Warning` may not gain components), `Llm.check`; `Handoff` is
+  now an instance per call.
+- S-13 `AssistantMessage.toJson/fromJson` (`ai-gate.reply/1`); replay fidelity in each codec's class doc.
+- S-15 `maven-publish`, version in `gradle.properties`, `llm/CHANGELOG.md`.
+- S-17 `ChatOptions.fields(model)`, `Provider.fields()`, `ApiCompat.fields()`, `ProvidersConfig.validate`,
+  `RequestEvent.Progress` (≤ 1 per 250 ms).
+
+## Decisions and deviations from the document
+- `UsageUpdate(Usage observed)` without a `finalForCall` component: the flag lives on `Usage` (one representation).
+- `CacheBreakpoint.retention` and `TokenCount.marginTokens` are `@Nullable`/`long`, not `Optional` components.
+- `ApiFeatures` without `schemaDialects`/`strictSchemas`: no codec holds those facts yet.
+- `ProviderOptions.fields()` not added: provider options have neither a `set(key, raw)` path nor a JSON form.
+- Forms write version 2 only when a new member is present, so older readers keep working.
+
+## Not done (document: P3 / later)
+- S-14 continuation and compaction; S-16 Kotlin coroutine artifact (needs kotlinx-coroutines, a new dependency).

@@ -11,6 +11,8 @@ import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -43,6 +45,7 @@ import net.ai.gate.internal.http.HttpErrors;
 import net.ai.gate.internal.http.Redaction;
 import net.ai.gate.lifecycle.CancelToken;
 import net.ai.gate.lifecycle.Registration;
+import net.ai.gate.metadata.Attempt;
 import net.ai.gate.metadata.Usage;
 import net.ai.gate.model.ModelRef;
 import net.ai.gate.spi.http.HttpCall;
@@ -54,8 +57,9 @@ import org.jspecify.annotations.Nullable;
 /// One logical call: its identity, deadline and cancel token, the attempt loop — credentials ▷ interceptors ▷
 /// transport, retrying only documented not-processed failures — and its events, delivered in order. The call owns
 /// its token for its whole lifetime: the link to the caller's token is released on every terminal path, and every
-/// blocking phase (credentials, send, body, backoff) observes cancellation and the deadline. Confined to the calling
-/// thread, except cancellation.
+/// blocking phase (credentials, send, body, backoff) observes cancellation and the deadline. Each attempt is recorded
+/// in a ledger: when it started, how it ended, whether the request left the client. Confined to the thread running
+/// it — handed over once by `Llm.start` — except cancellation.
 final class Call {
     private static final System.Logger WIRE = System.getLogger("net.ai.gate.wire");
 
@@ -81,6 +85,11 @@ final class Call {
     private @Nullable String providerRequestId;
     private int attempts;
     private boolean finished;
+    private final List<Attempt> ledger = new ArrayList<>();
+    private @Nullable Instant attemptAt;     // the open attempt, if any
+    private long attemptStart;
+    private boolean attemptSent;
+    private @Nullable Integer attemptStatus;
 
     Call(Core core, Provider provider, ModelRef model, String api, ChatOptions options, CredentialStore store, boolean streaming,
          Function<HttpReply, LlmException.Details> errors) {
@@ -106,6 +115,11 @@ final class Call {
         core.hub().emit(RequestEvent.FirstOutput.of(requestId, model, tags, core.clock().instant(), firstOutput), listeners);
     }
 
+    /// Content-free progress of a stream, for listeners of hosts that own the stream.
+    void progress(@Nullable Long outputTokens, long outputChars) {
+        core.hub().emit(RequestEvent.Progress.of(requestId, model, tags, core.clock().instant(), outputTokens, outputChars), listeners);
+    }
+
     void completed(@Nullable AssistantMessage reply, boolean fromCache) { finished(Outcome.COMPLETED, reply, null, fromCache); }
 
     /// Adds call facts to a failure, marks the partial reply, emits `Finished` and returns what the caller throws.
@@ -129,9 +143,10 @@ final class Call {
         finished = true;
         core.untrack(token);
         parentLink.close();
+        endAttempt(error == null ? null : error.code(), error != null && error.outcomeUnknown());
         var usage = reply != null ? reply.usage() : Usage.empty();
         core.hub().emit(RequestEvent.Finished.builder(requestId, model, tags, core.clock().instant(), outcome)
-                .usage(usage).latency(elapsed()).timeToFirstOutput(firstOutput).attempts(fromCache ? 0 : attempts)
+                .usage(usage).latency(elapsed()).timeToFirstOutput(firstOutput).attempts(fromCache ? 0 : attempts).attemptsDetail(List.copyOf(ledger))
                 .warnings(reply != null ? reply.warnings() : List.of()).fromCache(fromCache)
                 .errorCode(error == null ? null : error.code()).outcomeUnknown(error != null && error.outcomeUnknown())
                 .providerRequestId(providerRequestId).build(), listeners);
@@ -142,6 +157,13 @@ final class Call {
     @Nullable Duration timeToFirstOutput() { return firstOutput; }
     @Nullable String providerRequestId() { return providerRequestId; }
     int attempts() { return attempts; }
+    CredentialStore store() { return store; }
+
+    /// Every attempt so far; an open one — the attempt that produced the reply — is closed as successful.
+    List<Attempt> ledger() {
+        endAttempt(null, false);
+        return List.copyOf(ledger);
+    }
     @Nullable Long deadline() { return deadline; }
     Map<String, String> tags() { return tags; }
     void watchdogFired(@Nullable ErrorCode code) { if (code != null) watchdogFired = code; }
@@ -156,6 +178,7 @@ final class Call {
         boolean refreshed = false;
         for (int attempt = 1; ; attempt++) {
             attempts = attempt;
+            beginAttempt();
             checkActive();
             var auth = resolve(rejected);
             rejected = null;
@@ -168,24 +191,42 @@ final class Call {
                 var failure = classify(e);
                 var delay = failure.retryable() && replayable ? backoff(attempt + 1, null) : null;
                 if (delay == null) throw failure;
+                endAttempt(failure.code(), failure.outcomeUnknown());
                 pause(failure.code(), attempt + 1, delay);
                 continue;
             }
             providerRequestId = reply.header("x-request-id").or(() -> reply.header("request-id")).orElse(providerRequestId);
+            attemptStatus = reply.status();
             if (reply.successful()) return reply;
             LlmException.Details details;
             try (reply) { details = read(reply, () -> errors.apply(reply)); }
             if (reply.status() == 401 && !refreshed && core.resolver().usesOAuth(provider, store)) {
                 refreshed = true;
                 rejected = auth;   // one forced refresh of exactly this token; later attempts resolve normally
+                endAttempt(details.code(), false);
                 continue;
             }
             boolean retryable = retry.retryOnStatus().contains(reply.status()) && !details.outcomeUnknown()
                     && !details.code().equals(ErrorCode.QUOTA_EXHAUSTED);   // waiting does not refill a quota
             var delay = retryable && replayable ? backoff(attempt + 1, details.retryAfter().orElse(null)) : null;
             if (delay == null) throw HttpErrors.exception(details.toBuilder().retryable(retryable).build(), null);
+            endAttempt(details.code(), false);
             pause(details.code(), attempt + 1, delay);
         }
+    }
+
+    private void beginAttempt() {
+        attemptAt = core.clock().instant();
+        attemptStart = System.nanoTime();
+        attemptSent = false;
+        attemptStatus = null;
+    }
+
+    private void endAttempt(@Nullable ErrorCode error, boolean outcomeUnknown) {
+        var at = attemptAt;
+        if (at == null) return;
+        ledger.add(new Attempt(ledger.size() + 1, at, Duration.ofNanos(System.nanoTime() - attemptStart), attemptStatus, error, attemptSent, outcomeUnknown));
+        attemptAt = null;
     }
 
     /// Credentials, inside the cancellation and deadline guards: a refresh may block on the store and the network.
@@ -222,6 +263,7 @@ final class Call {
         var remaining = deadline == null ? null : Duration.ofNanos(Math.max(1_000_000, deadline - System.nanoTime()));
         if (core.http().wireLog() != WireLog.OFF) WIRE.log(System.Logger.Level.INFO, () -> "→ " + describe(call));
         sent = true;
+        attemptSent = true;
         var reply = provider.transport().orElse(core.transport()).send(call, TransportOptions.of(timeouts.connect(), remaining, streaming));
         if (core.http().wireLog() != WireLog.OFF) WIRE.log(System.Logger.Level.INFO, () -> "← " + reply.status() + " " + requestId);
         return reply;

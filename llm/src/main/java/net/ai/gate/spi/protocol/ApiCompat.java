@@ -2,8 +2,10 @@ package net.ai.gate.spi.protocol;
 
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 
+import net.ai.gate.config.FieldDescriptor;
 import net.ai.gate.json.Json;
 import net.ai.gate.json.JsonBoolean;
 import net.ai.gate.json.JsonObject;
@@ -24,6 +26,22 @@ public interface ApiCompat {
 
     /// The canonical JSON form (`ProvidersConfig`): the fields that are set, enum values in lower case.
     JsonObject toJson();
+
+    /// The form of these flags: one field per [#toJson()] member, defaults as documented, group `Compatibility`.
+    default List<FieldDescriptor> fields() { return List.of(); }
+
+    /// For [#fields()]: a boolean flag.
+    static FieldDescriptor flagField(String key, String label, boolean defaultValue, String help) {
+        return FieldDescriptor.builder(key, FieldDescriptor.Kind.BOOLEAN).label(label).group("Compatibility")
+                .defaultValue(String.valueOf(defaultValue)).help(help).build();
+    }
+
+    /// For [#fields()]: an enum choice, in lower case as [#toJson()] writes it.
+    static <E extends Enum<E>> FieldDescriptor choiceField(String key, String label, E defaultValue, String help) {
+        return FieldDescriptor.builder(key, FieldDescriptor.Kind.CHOICE).label(label).group("Compatibility").help(help)
+                .defaultValue(defaultValue.name().toLowerCase(Locale.ROOT))
+                .choices(Arrays.stream(defaultValue.getDeclaringClass().getEnumConstants()).map(c -> c.name().toLowerCase(Locale.ROOT)).toList()).build();
+    }
 
     /// For [#toJson()]: alternating names and values; `null` values are left out, enums written in lower case.
     static JsonObject json(@Nullable Object... namesAndValues) {

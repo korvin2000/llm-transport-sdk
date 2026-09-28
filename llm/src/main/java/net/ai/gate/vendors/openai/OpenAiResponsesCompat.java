@@ -1,7 +1,9 @@
 package net.ai.gate.vendors.openai;
 
+import java.util.List;
 import java.util.Optional;
 
+import net.ai.gate.config.FieldDescriptor;
 import net.ai.gate.json.JsonObject;
 import net.ai.gate.spi.protocol.ApiCompat;
 import org.jspecify.annotations.Nullable;
@@ -65,6 +67,14 @@ public final class OpenAiResponsesCompat implements ApiCompat {
     @Override public JsonObject toJson() {
         return ApiCompat.json("streamingOnly", streamingOnly, "maxOutputTokens", maxOutputTokens, "sessionHeaders", sessionHeaders,
                 "defaultInstructions", defaultInstructions);
+    }
+
+    @Override public List<FieldDescriptor> fields() {
+        return List.of(ApiCompat.flagField("streamingOnly", "Streaming only", false, "The endpoint answers with events only"),
+                ApiCompat.flagField("maxOutputTokens", "Output limit", true, "The endpoint accepts max_output_tokens"),
+                ApiCompat.flagField("sessionHeaders", "Session headers", false, "The session id is also sent as session-id and x-client-request-id"),
+                FieldDescriptor.builder("defaultInstructions", FieldDescriptor.Kind.TEXT).label("Default instructions").group("Compatibility")
+                        .help("Sent when the conversation has no system prompt").build());
     }
 
     @Override public boolean equals(Object o) { return o instanceof OpenAiResponsesCompat c && toJson().equals(c.toJson()); }

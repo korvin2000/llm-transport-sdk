@@ -5,8 +5,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
+import net.ai.gate.cache.CacheRetention;
 import net.ai.gate.chat.content.Content;
+import net.ai.gate.chat.content.ToolCall;
 import net.ai.gate.chat.content.ToolResult;
 import net.ai.gate.chat.tool.Tool;
 import net.ai.gate.internal.serialization.ConversationJson;
@@ -20,9 +23,9 @@ public final class Conversation {
     private final @Nullable String system;
     private final List<Tool> tools;
     private final List<Message> messages;
-    private final List<Integer> cacheBreakpoints;
+    private final List<CacheBreakpoint> cacheBreakpoints;
 
-    private Conversation(@Nullable String system, List<Tool> tools, List<Message> messages, List<Integer> cacheBreakpoints) {
+    private Conversation(@Nullable String system, List<Tool> tools, List<Message> messages, List<CacheBreakpoint> cacheBreakpoints) {
         this.system = system;
         this.tools = List.copyOf(tools);
         this.messages = List.copyOf(messages);
@@ -31,9 +34,9 @@ public final class Conversation {
         for (var tool : this.tools) if (!names.add(tool.name())) throw new IllegalArgumentException("Duplicate tool '" + tool.name() + "'");
         int previous = -1;
         for (var breakpoint : this.cacheBreakpoints) {
-            if (breakpoint <= previous || breakpoint > this.messages.size())
-                throw new IllegalArgumentException("Cache breakpoints must be ascending and within the messages: " + this.cacheBreakpoints + " for " + this.messages.size() + " messages");
-            previous = breakpoint;
+            if (breakpoint.index() <= previous || breakpoint.index() > this.messages.size())
+                throw new IllegalArgumentException("Cache breakpoints must be ascending and within the messages: " + cacheBreakpoints() + " for " + this.messages.size() + " messages");
+            previous = breakpoint.index();
         }
     }
 
@@ -47,7 +50,10 @@ public final class Conversation {
 
     /// Explicit prompt-cache prefix ends, as the number of messages before each marker (`0` = after system and
     /// tools); empty means automatic placement.
-    public List<Integer> cacheBreakpoints() { return cacheBreakpoints; }
+    public List<Integer> cacheBreakpoints() { return cacheBreakpoints.stream().map(CacheBreakpoint::index).toList(); }
+
+    /// The explicit breakpoints with their own retention, if any.
+    public List<CacheBreakpoint> cacheBreakpointsWithRetention() { return cacheBreakpoints; }
 
     public Conversation append(Message... added) {
         var copy = new ArrayList<>(messages);
@@ -56,7 +62,13 @@ public final class Conversation {
     }
 
     /// The reply — tool calls and signatures included — followed by the host's results in one step.
+    /// @throws IllegalArgumentException when a result answers a tool call the (partial) reply did not complete
     public Conversation append(AssistantMessage reply, List<ToolResult> results) {
+        var incomplete = reply.incompleteParts().stream().map(reply.content()::get).filter(ToolCall.class::isInstance)
+                .map(c -> ((ToolCall) c).id()).collect(Collectors.toSet());
+        for (var result : results)
+            if (incomplete.contains(result.callId()))
+                throw new IllegalArgumentException("Tool call " + result.callId() + " was cut off in a partial reply and cannot be answered");
         return results.isEmpty() ? append(reply) : append(reply, ToolResultMessage.of(results));
     }
 
@@ -68,7 +80,13 @@ public final class Conversation {
 
     /// A copy with other messages and explicit breakpoints (the SDK's per-call adaptation remaps them).
     /// @throws IllegalArgumentException when the breakpoints are not ascending within the messages
-    public Conversation withMessages(List<Message> replaced, List<Integer> breakpoints) { return new Conversation(system, tools, replaced, breakpoints); }
+    public Conversation withMessages(List<Message> replaced, List<Integer> breakpoints) {
+        return new Conversation(system, tools, replaced, breakpoints.stream().map(i -> new CacheBreakpoint(i, null)).toList());
+    }
+
+    /// A copy with other explicit breakpoints.
+    /// @throws IllegalArgumentException when they are not ascending within the messages
+    public Conversation withCacheBreakpoints(List<CacheBreakpoint> breakpoints) { return new Conversation(system, tools, messages, breakpoints); }
 
     public Builder toBuilder() {
         var b = new Builder();
@@ -103,7 +121,7 @@ public final class Conversation {
         private @Nullable String system;
         private final List<Tool> tools = new ArrayList<>();
         private final List<Message> messages = new ArrayList<>();
-        private final List<Integer> cacheBreakpoints = new ArrayList<>();
+        private final List<CacheBreakpoint> cacheBreakpoints = new ArrayList<>();
 
         private Builder() { }
 
@@ -121,13 +139,20 @@ public final class Conversation {
         public Builder messages(List<? extends Message> replaced) {
             messages.clear();
             messages.addAll(replaced);
-            cacheBreakpoints.removeIf(b -> b > messages.size());
+            cacheBreakpoints.removeIf(b -> b.index() > messages.size());
             return this;
         }
 
         /// Marks the end of everything added so far as a prompt-cache prefix; overrides automatic placement.
         public Builder cacheBreakpoint() {
-            if (cacheBreakpoints.isEmpty() || cacheBreakpoints.getLast() != messages.size()) cacheBreakpoints.add(messages.size());
+            if (cacheBreakpoints.isEmpty() || cacheBreakpoints.getLast().index() != messages.size()) cacheBreakpoints.add(new CacheBreakpoint(messages.size(), null));
+            return this;
+        }
+
+        /// As [#cacheBreakpoint()], with its own retention — e.g. `LONG` for a stable prefix, the default for the rest.
+        public Builder cacheBreakpoint(CacheRetention retention) {
+            if (!cacheBreakpoints.isEmpty() && cacheBreakpoints.getLast().index() == messages.size()) cacheBreakpoints.removeLast();
+            cacheBreakpoints.add(new CacheBreakpoint(messages.size(), retention));
             return this;
         }
 

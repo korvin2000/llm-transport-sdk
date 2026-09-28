@@ -1,5 +1,7 @@
 package net.ai.gate.internal.core;
 
+import java.util.function.ToLongFunction;
+
 import net.ai.gate.cache.CacheRetention;
 import net.ai.gate.chat.AssistantMessage;
 import net.ai.gate.chat.Conversation;
@@ -8,6 +10,7 @@ import net.ai.gate.chat.UserMessage;
 import net.ai.gate.chat.options.ChatOptions;
 import net.ai.gate.chat.options.OutputFormat;
 import net.ai.gate.chat.options.ReasoningHandoff;
+import net.ai.gate.chat.tool.FunctionTool;
 import net.ai.gate.error.ErrorCode;
 import net.ai.gate.error.InvalidRequestException;
 import net.ai.gate.error.LlmException;
@@ -83,6 +86,26 @@ final class Resolver {
             };
         }
         return chars / 4 + 16;
+    }
+
+    /// The tokens of the text a conversation carries — system prompt, tool declarations, messages — by `tokenizer`;
+    /// message framing and media are not text and not counted.
+    static long countTokens(Conversation conversation, ToLongFunction<String> tokenizer) {
+        long tokens = conversation.system().map(tokenizer::applyAsLong).orElse(0L);
+        for (var tool : conversation.tools()) {
+            tokens += tokenizer.applyAsLong(tool.name());
+            if (tool instanceof FunctionTool f)
+                tokens += tokenizer.applyAsLong(f.parameters().asJson().toJson()) + f.description().map(tokenizer::applyAsLong).orElse(0L);
+        }
+        for (var message : conversation.messages()) {
+            tokens += switch (message) {
+                case UserMessage u -> tokenizer.applyAsLong(u.text());
+                case AssistantMessage a -> tokenizer.applyAsLong(a.text()) + a.reasoningText().map(tokenizer::applyAsLong).orElse(0L)
+                        + a.toolCalls().stream().mapToLong(c -> tokenizer.applyAsLong(c.name()) + tokenizer.applyAsLong(c.argumentsJson())).sum();
+                case ToolResultMessage r -> r.results().stream().mapToLong(x -> tokenizer.applyAsLong(x.text())).sum();
+            };
+        }
+        return tokens;
     }
 
     private static InvalidRequestException unsupported(String message) {

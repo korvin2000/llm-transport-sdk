@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.util.Currency;
 import java.util.List;
 
+import net.ai.gate.cache.CacheRetention;
 import net.ai.gate.chat.content.Content;
 import net.ai.gate.chat.content.ToolCall;
 import net.ai.gate.chat.content.ToolResult;
@@ -129,5 +130,22 @@ class ConversationJsonTest {
                               "content":[{"type":"image","mediaType":"image/png","source":{"kind":"bogus"}}]}]}""");
         var sourceError = assertThrows(IllegalArgumentException.class, () -> Conversation.fromJson(unknownSourceKind));
         assertTrue(sourceError.getMessage().startsWith("messages[0].content[0].source.kind:"), sourceError.getMessage());
+    }
+
+    @Test
+    void partialRepliesKeepTheirMarksInVersionTwo() {
+        var partial = AssistantMessage.builder(new ModelRef("anthropic", "claude-sonnet-5"), "anthropic-messages")
+                .text("Checking").add(ToolCall.of("toolu_1", "weather", "{\"ci")).incompletePart(1)
+                .usage(Usage.builder().input(12).cacheRead(300).cacheWrite(CacheRetention.SHORT, 2).cacheWrite(CacheRetention.LONG, 3).finalForCall(false).build())
+                .stopReason(StopReason.ABORTED).build();
+        var conversation = Conversation.of("q").append(partial);
+        var json = conversation.toJson();
+        assertEquals("ai-gate.conversation/2", json.string("schema"));
+        var read = Conversation.fromJson(json);
+        assertEquals(conversation, read);
+        var restored = (AssistantMessage) read.messages().get(1);
+        assertEquals(List.of(1), restored.incompleteParts());
+        assertEquals(5, restored.usage().cacheWrite().orElseThrow());
+        assertEquals("ai-gate.conversation/1", Conversation.of("q").toJson().string("schema"), "older readers keep reading plain conversations");
     }
 }

@@ -11,6 +11,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -18,6 +20,7 @@ import org.jspecify.annotations.Nullable;
 
 import net.ai.gate.cache.CacheRetention;
 import net.ai.gate.chat.AssistantMessage;
+import net.ai.gate.chat.CacheBreakpoint;
 import net.ai.gate.chat.StopReason;
 import net.ai.gate.chat.ToolResultMessage;
 import net.ai.gate.chat.UserMessage;
@@ -37,6 +40,7 @@ import net.ai.gate.metadata.Warning;
 import net.ai.gate.model.ReasoningLevel;
 import net.ai.gate.spi.http.HttpCall;
 import net.ai.gate.spi.http.HttpReply;
+import net.ai.gate.spi.protocol.ApiFeatures;
 import net.ai.gate.spi.protocol.ApiRequest;
 import net.ai.gate.spi.protocol.Codecs;
 import net.ai.gate.spi.protocol.DecodeContext;
@@ -52,8 +56,15 @@ import net.ai.gate.vendors.anthropic.AnthropicOptions;
 /// Reasoning: Claude models after the 4.5 generation think adaptively (`thinking.type: adaptive` with
 /// `output_config.effort`); earlier ones, compatible endpoints and an explicit `AnthropicOptions.thinkingBudget`
 /// use a token budget, with `max_tokens` raised above it. Budget thinking cannot force a tool, and neither can
-/// Opus 5.5, Fable 5.1 or Mythos 5.1: `required`/`only` become `auto` there. Prompt caching marks at most four
-/// blocks: the explicit breakpoints, or automatically the last tool, the system prompt and the last message.
+/// Opus 5.5, Fable 5.1 or Mythos 5.1: `required`/`only` become `auto` there. Raising `max_tokens` above a budget is
+/// an adaptation (`strict` fails), and the effective limit is reported. Prompt caching marks at most four blocks —
+/// the explicit breakpoints, each with its own TTL, or automatically the last tool, the system prompt and the last
+/// message — and a 1-hour marker may not follow a 5-minute one.
+///
+/// Usage: `message_start` and `message_delta` usage arrive as `UsageUpdate`s; cache writes are split into the 5-minute
+/// and 1-hour classes when `cache_creation` reports them; absent counters stay absent. Input tokens are counted by
+/// `messages/count_tokens`. Replay keeps text, signed and redacted thinking, tool use and unknown blocks; citations
+/// replay as plain text.
 ///
 /// Citations cover their whole text block (`0..length`); document citations have no URL and point at
 /// `document:<index>`, search results without one at `search-result:<index>`. Cited text replays as plain text.
@@ -118,12 +129,13 @@ public final class MessagesCodec implements WireApi {
                 }
             }
         }
-        cacheMarkers(o.cacheRetention().orElse(CacheRetention.SHORT), conversation.cacheBreakpoints(), system, tools, turns, compat, ctx);
+        cacheMarkers(o.cacheRetention().orElse(CacheRetention.SHORT), conversation.cacheBreakpointsWithRetention(), system, tools, turns, compat, ctx);
 
         var body = new LinkedHashMap<String, Object>();
         body.put("model", request.model().id());
         int maxTokens = o.maxTokens().orElseGet(() -> ctx.defaultMaxTokens().orElse(FALLBACK_MAX_TOKENS));
         body.put("max_tokens", maxTokens);
+        ctx.outputLimit(maxTokens);
         if (!system.isEmpty()) body.put("system", system);
         body.put("messages", turns.stream().map(t -> Json.object("role", t.role(), "content", t.blocks())).toList());
         if (request.streaming()) body.put("stream", true);
@@ -156,8 +168,9 @@ public final class MessagesCodec implements WireApi {
                 long cap = request.model().maxOutputTokens().orElse(Long.MAX_VALUE);
                 int raised = (int) Math.min(cap, (long) tokens + ANSWER_ROOM);
                 if (raised <= tokens) tokens = Math.max(1024, raised - ANSWER_ROOM);
-                ctx.warn(new Warning("option_adapted", "max_tokens " + maxTokens + " → " + raised + " to leave room above the thinking budget of " + tokens));
+                ctx.adapt(new Warning("option_adapted", "max_tokens " + maxTokens + " → " + raised + " to leave room above the thinking budget of " + tokens));
                 body.put("max_tokens", raised);
+                ctx.outputLimit(raised);
             }
             body.put("thinking", Json.object("type", "enabled", "budget_tokens", tokens));
         }
@@ -207,30 +220,42 @@ public final class MessagesCodec implements WireApi {
         return call;
     }
 
-    /// Explicit breakpoints — `0` marks the end of system and tools — or automatic placement; at most four markers.
-    private static void cacheMarkers(CacheRetention retention, List<Integer> breakpoints, List<JsonObject> system, List<JsonObject> tools,
-                                     List<Turn> turns, AnthropicCompat compat, EncodeContext ctx) {
-        if (retention == CacheRetention.NONE) return;
-        var marker = Json.object("type", "ephemeral");
-        if (retention == CacheRetention.LONG) {
-            if (compat.cacheTtl()) marker = marker.with("ttl", "1h");
-            else ctx.warn(new Warning("cache_hint_ignored", "the endpoint has no extended cache TTL; the default applies"));
-        }
-        var targets = new ArrayList<List<JsonObject>>();
+    /// Explicit breakpoints — `0` marks the end of system and tools — each with its retention or the call's, or
+    /// automatic placement with the call's; at most four markers, 1-hour ones before 5-minute ones. Every fallback
+    /// is an adaptation: it changes what the cache costs.
+    private static void cacheMarkers(CacheRetention callRetention, List<CacheBreakpoint> breakpoints, List<JsonObject> system,
+                                     List<JsonObject> tools, List<Turn> turns, AnthropicCompat compat, EncodeContext ctx) {
+        record Target(List<JsonObject> blocks, CacheRetention retention) { }
+        var targets = new ArrayList<Target>();
         if (breakpoints.isEmpty()) {
-            targets.add(tools);
-            targets.add(system);
-            if (!turns.isEmpty()) targets.add(turns.getLast().blocks());
+            targets.add(new Target(tools, callRetention));
+            targets.add(new Target(system, callRetention));
+            if (!turns.isEmpty()) targets.add(new Target(turns.getLast().blocks(), callRetention));
         } else {
-            for (int b : breakpoints) targets.add(b == 0 ? (system.isEmpty() ? tools : system) : turns.get(b - 1).blocks());
+            for (var b : breakpoints) targets.add(new Target(b.index() == 0 ? (system.isEmpty() ? tools : system) : turns.get(b.index() - 1).blocks(),
+                    b.retention() != null ? b.retention() : callRetention));
         }
         int placed = 0;
-        for (var blocks : targets) {
+        boolean shortPlaced = false;
+        for (var target : targets) {
+            var retention = target.retention();
+            if (retention == CacheRetention.NONE) continue;
             if (placed == MAX_CACHE_MARKERS) {
-                ctx.warn(new Warning("cache_hint_ignored", "the Messages API accepts at most " + MAX_CACHE_MARKERS + " cache markers"));
+                ctx.adapt(new Warning("cache_hint_ignored", "the Messages API accepts at most " + MAX_CACHE_MARKERS + " cache markers; the rest were not sent"));
                 return;
             }
-            if (mark(blocks, marker)) placed++;
+            if (retention == CacheRetention.LONG && !compat.cacheTtl()) {
+                ctx.adapt(new Warning("cache_hint_ignored", "the endpoint has no extended cache TTL; the default applies"));
+                retention = CacheRetention.SHORT;
+            } else if (retention == CacheRetention.LONG && shortPlaced) {
+                ctx.adapt(new Warning("cache_hint_ignored", "a 1-hour cache marker cannot follow a 5-minute one; it was sent with the default TTL"));
+                retention = CacheRetention.SHORT;
+            }
+            var marker = retention == CacheRetention.LONG ? Json.object("type", "ephemeral", "ttl", "1h") : Json.object("type", "ephemeral");
+            if (mark(target.blocks(), marker)) {
+                placed++;
+                shortPlaced |= retention == CacheRetention.SHORT;
+            }
         }
     }
 
@@ -345,12 +370,16 @@ public final class MessagesCodec implements WireApi {
         };
     }
 
-    /// `input_tokens` already excludes cache reads and writes.
+    /// `input_tokens` already excludes cache reads and writes; `cache_creation` splits writes by TTL.
     private static Usage usage(JsonObject u) {
         if (u.isEmpty()) return Usage.empty();
         var b = Usage.builder().raw(u);
         u.optLong("input_tokens").ifPresent(b::input);
-        b.cacheRead(u.optLong("cache_read_input_tokens").orElse(0)).cacheWrite(u.optLong("cache_creation_input_tokens").orElse(0));
+        u.optLong("cache_read_input_tokens").ifPresent(b::cacheRead);
+        u.optLong("cache_creation_input_tokens").ifPresent(b::cacheWrite);
+        var classes = u.object("cache_creation");
+        classes.optLong("ephemeral_5m_input_tokens").ifPresent(n -> b.cacheWrite(CacheRetention.SHORT, n));
+        classes.optLong("ephemeral_1h_input_tokens").ifPresent(n -> b.cacheWrite(CacheRetention.LONG, n));
         u.optLong("output_tokens").ifPresent(b::output);
         return b.build();
     }
@@ -376,7 +405,8 @@ public final class MessagesCodec implements WireApi {
                         id = message.optString("id").orElse(null);
                         model = message.optString("model").orElse(null);
                         usage = message.object("usage");
-                        yield List.of(ChatEvent.Started.of(id, model));
+                        yield usage.isEmpty() ? List.of(ChatEvent.Started.of(id, model))
+                                : List.of(ChatEvent.Started.of(id, model), new ChatEvent.UsageUpdate(usage(usage)));
                     }
                     case "content_block_start" -> {
                         var block = event.object("content_block");
@@ -394,8 +424,9 @@ public final class MessagesCodec implements WireApi {
                     }
                     case "message_delta" -> {
                         event.object("delta").optString("stop_reason").ifPresent(r -> stopReason = r);
-                        for (var member : event.object("usage").members().entrySet()) usage = usage.with(member.getKey(), member.getValue());
-                        yield List.of();
+                        var delta = event.object("usage");
+                        for (var member : delta.members().entrySet()) usage = usage.with(member.getKey(), member.getValue());
+                        yield delta.isEmpty() ? List.of() : List.of(new ChatEvent.UsageUpdate(usage(usage)));
                     }
                     case "message_stop" -> List.of(ChatEvent.Done.of(AssistantMessage.builder(ctx.model().ref(), ID).stopReason(stop(stopReason))
                             .usage(usage(usage)).responseId(id).responseModel(model).build()));
@@ -445,4 +476,24 @@ public final class MessagesCodec implements WireApi {
     /// Tool-use ids must match `^[a-zA-Z0-9_-]{1,64}$`: foreign ids (OpenAI's reach 450+ characters) are rewritten
     /// deterministically, so a call and its result map to the same id.
     @Override public String normalizeToolCallId(String foreignId) { return Codecs.toolCallId(foreignId, 64); }
+
+    @Override public ApiFeatures features(DecodeContext ctx) {
+        var ttl = ctx.compat(AnthropicCompat.defaults()).cacheTtl();
+        return new ApiFeatures(ID, ApiFeatures.OutputCap.ENFORCED, 1, ApiFeatures.PromptCache.EXPLICIT_MARKERS, MAX_CACHE_MARKERS,
+                ttl ? Set.of(CacheRetention.SHORT, CacheRetention.LONG) : Set.of(CacheRetention.SHORT), false, true, true,
+                Set.of("input", "output", "cache_read", "cache_write", "cache_write_5m", "cache_write_1h"), true, true, false, true);
+    }
+
+    /// `messages/count_tokens` takes the members that make up the prompt, with the same version and beta headers.
+    @Override public Optional<HttpCall> countRequest(HttpCall request) {
+        if (!(request.body().orElse(null) instanceof JsonObject body)) return Optional.empty();
+        var counted = new LinkedHashMap<String, Object>();
+        for (var member : List.of("model", "system", "messages", "tools", "tool_choice", "thinking"))
+            body.get(member).ifPresent(v -> counted.put(member, v));
+        return Optional.of(HttpCall.post("messages/count_tokens", Json.valueOf(counted)).withHeaders(request.headers()));
+    }
+
+    @Override public OptionalLong countReply(HttpReply reply) {
+        return reply.json() instanceof JsonObject json ? json.optLong("input_tokens") : OptionalLong.empty();
+    }
 }

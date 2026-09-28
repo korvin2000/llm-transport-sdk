@@ -7,7 +7,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Pattern;
 
@@ -34,6 +37,7 @@ import net.ai.gate.model.ModelRef;
 import net.ai.gate.model.ReasoningLevel;
 import net.ai.gate.spi.http.HttpCall;
 import net.ai.gate.spi.http.HttpReply;
+import net.ai.gate.spi.protocol.ApiFeatures;
 import net.ai.gate.spi.protocol.ApiRequest;
 import net.ai.gate.spi.protocol.Codecs;
 import net.ai.gate.spi.protocol.DecodeContext;
@@ -44,6 +48,7 @@ import net.ai.gate.spi.protocol.WireApi;
 import net.ai.gate.vendors.google.GeminiOptions;
 
 /// Gemini `models/{model}:generateContent` and `:streamGenerateContent?alt=sse` (`v1beta` in the preset's base URL).
+/// Every streamed chunk's `usageMetadata` is a `UsageUpdate`; input tokens are counted by `:countTokens`.
 ///
 /// Thought signatures may sit on any part. A signature on a thought part stays with that reasoning part; one on a
 /// text or function-call part becomes a text-less signed `Reasoning` just before it, and is re-attached to the next
@@ -263,7 +268,8 @@ public final class GenerateContentCodec implements WireApi {
                 .responseId(chunk.optString("responseId").orElse(null)).responseModel(chunk.optString("modelVersion").orElse(null));
     }
 
-    /// `promptTokenCount` includes cached tokens; `thoughtsTokenCount` is not part of `candidatesTokenCount`.
+    /// `promptTokenCount` includes cached tokens; `thoughtsTokenCount` is not part of `candidatesTokenCount`. The API
+    /// omits zero-valued counters (proto3 JSON), so an absent cache count is `0`, and it has no cache-write bucket.
     static Usage usage(JsonObject u) {
         if (u.isEmpty()) return Usage.empty();
         var b = Usage.builder().raw(u);
@@ -320,6 +326,7 @@ public final class GenerateContentCodec implements WireApi {
                     }
                 }
                 last = chunk;
+                if (!chunk.object("usageMetadata").isEmpty()) events.add(new ChatEvent.UsageUpdate(usage(chunk.object("usageMetadata"))));
                 if (c.optString("finishReason").isPresent() || chunk.object("promptFeedback").optString("blockReason").isPresent()) candidate = c;
                 return events;
             }
@@ -341,5 +348,24 @@ public final class GenerateContentCodec implements WireApi {
                 return index;
             }
         };
+    }
+
+    @Override public ApiFeatures features(DecodeContext ctx) {
+        return new ApiFeatures(ID, ApiFeatures.OutputCap.ENFORCED, 1, ApiFeatures.PromptCache.NAMED_RESOURCE, 0, Set.of(), false, true, false,
+                Set.of("input", "output", "reasoning", "cache_read", "cache_write"), true, true, false, true);
+    }
+
+    /// `models/{model}:countTokens` over the whole request (`generateContentRequest`).
+    @Override public Optional<HttpCall> countRequest(HttpCall request) {
+        var path = request.uri().getPath();
+        int colon = path.lastIndexOf(':');
+        if (colon < 0 || !(request.body().orElse(null) instanceof JsonObject body)) return Optional.empty();
+        var model = path.substring(0, colon);
+        return Optional.of(HttpCall.post(model + ":countTokens", Json.object("generateContentRequest", body.with("model", model)))
+                .withHeaders(request.headers()));
+    }
+
+    @Override public OptionalLong countReply(HttpReply reply) {
+        return reply.json() instanceof JsonObject json ? json.optLong("totalTokens") : OptionalLong.empty();
     }
 }

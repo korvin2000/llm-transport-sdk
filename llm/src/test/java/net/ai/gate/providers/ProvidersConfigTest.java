@@ -14,8 +14,8 @@ import net.ai.gate.json.Json;
 import net.ai.gate.json.JsonObject;
 import net.ai.gate.model.Model;
 import net.ai.gate.vendors.openai.OpenAiCompatible;
-import net.ai.gate.vendors.openai.OpenAiCompletionsCompat;
 import net.ai.gate.vendors.openai.OpenAiCompletionsCompat.ReasoningFormat;
+import net.ai.gate.vendors.openai.OpenAiCompletionsCompat;
 import org.junit.jupiter.api.Test;
 
 /// Secret-free, versioned provider configuration that states only differences from presets.
@@ -104,5 +104,23 @@ class ProvidersConfigTest {
         var error = assertThrows(IllegalArgumentException.class, () -> ProvidersConfig.read(json, Providers.presets()));
         assertTrue(error.getMessage().contains("thinkHarder"), error.getMessage());
         assertFalse(error.getMessage().contains("x-note"), error.getMessage());
+    }
+
+    @Test
+    void validateReportsEveryProblemWithItsPathWithoutThrowing() {
+        var json = """
+                {"schema":"ai-gate.providers/1","providers":[{"preset":"anthropic"},{"preset":"nope"},{"preset":"openai","apiKey":"x"}]}""";
+        var problems = ProvidersConfig.validate(json, Providers.presets());
+        assertEquals(List.of("providers[1]", "providers[2]"), problems.stream().map(ProvidersConfig.Problem::path).toList());
+        assertTrue(problems.get(1).message().contains("apiKey"), problems.toString());
+        assertEquals("schema", ProvidersConfig.validate("{\"schema\":\"other\"}", Providers.presets()).getFirst().path());
+        assertEquals("", ProvidersConfig.validate("{not json", Providers.presets()).getFirst().path());
+        assertTrue(ProvidersConfig.validate(ProvidersConfig.write(List.of(Providers.vllm())), Providers.presets()).isEmpty());
+    }
+
+    @Test
+    void providerFormsIncludeTheCompatFlagsOfTheirApi() {
+        var keys = OpenAiCompatible.ollama().fields().stream().map(f -> f.key()).toList();
+        assertTrue(keys.containsAll(List.of("name", "baseUrl", "headers", "developerRole", "reasoningFormat", "toolCallIdFormat")), keys.toString());
     }
 }

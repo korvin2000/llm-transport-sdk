@@ -6,6 +6,9 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
+import java.util.OptionalLong;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -37,6 +40,7 @@ import net.ai.gate.model.ReasoningLevel;
 import net.ai.gate.model.SupportLevel;
 import net.ai.gate.spi.http.HttpCall;
 import net.ai.gate.spi.http.HttpReply;
+import net.ai.gate.spi.protocol.ApiFeatures;
 import net.ai.gate.spi.protocol.ApiRequest;
 import net.ai.gate.spi.protocol.Codecs;
 import net.ai.gate.spi.protocol.DecodeContext;
@@ -55,13 +59,20 @@ import net.ai.gate.vendors.openai.OpenAiResponsesOptions;
 ///
 /// Reasoning models take `temperature` and `top_p` only with reasoning off; the catalog's `TEMPERATURE` support
 /// decides first. GPT-5.6 and later have no `prompt_cache_retention`
-/// ([prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)).
+/// ([prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)); asking them for `LONG` retention
+/// is an adaptation.
+///
+/// Usage arrives only with the final response. `input_tokens_details.cached_tokens` is the cache read; the API has no
+/// separate write bucket (writes are input), so writes are `0` where cache details are reported and absent where they
+/// are not. Input tokens are counted by `responses/input_tokens`. Replay keeps text, `call_id`s (not the function
+/// item `id`), reasoning items with their encrypted content (without `status`) and generated images.
 public final class ResponsesCodec implements WireApi {
     public static final ResponsesCodec INSTANCE = new ResponsesCodec();
     private static final String ID = "openai-responses";
     private static final String ENCRYPTED_REASONING = "reasoning.encrypted_content", IMAGE = "image_generation_call";
     private static final Pattern REASONING_FAMILY = Pattern.compile("(.*/)?(o[1-9]|gpt-[5-9]).*");
     private static final Pattern NO_CACHE_RETENTION = Pattern.compile("(.*/)?gpt-(5\\.([6-9]|\\d{2,})|[6-9]).*");
+    private static final int MIN_OUTPUT = 16;
 
     private ResponsesCodec() { }
 
@@ -90,7 +101,10 @@ public final class ResponsesCodec implements WireApi {
         body.put("input", input);
         if (request.streaming() || compat.streamingOnly()) body.put("stream", true);
         body.put("store", store);
-        if (compat.maxOutputTokens()) o.maxTokens().ifPresent(n -> body.put("max_output_tokens", Math.max(16, n)));
+        if (compat.maxOutputTokens()) o.maxTokens().ifPresent(n -> {
+            body.put("max_output_tokens", Math.max(MIN_OUTPUT, n));
+            ctx.outputLimit(Math.max(MIN_OUTPUT, n));
+        });
         else if (o.maxTokens().isPresent()) ctx.adapt(new Warning("option_dropped", "the endpoint takes no max_output_tokens; maxTokens was not sent"));
         if (Codecs.sampling(request, ctx, reasoningRejectsSampling(request.model(), level))) {
             o.temperature().ifPresent(t -> body.put("temperature", t));
@@ -143,7 +157,7 @@ public final class ResponsesCodec implements WireApi {
             extra.flatMap(OpenAiResponsesOptions::promptCacheKey).or(o::sessionId).ifPresent(key -> body.put("prompt_cache_key", key));
         if (retention == CacheRetention.LONG) {
             if (NO_CACHE_RETENTION.matcher(request.model().id()).matches())
-                ctx.warn(new Warning("cache_hint_ignored", request.model().id() + " has no extended prompt-cache retention; the default applies"));
+                ctx.adapt(new Warning("cache_hint_ignored", request.model().id() + " has no extended prompt-cache retention; the default applies"));
             else body.put("prompt_cache_retention", "24h");
         }
         extra.flatMap(OpenAiResponsesOptions::serviceTier).ifPresent(t -> body.put("service_tier", t));
@@ -289,13 +303,12 @@ public final class ResponsesCodec implements WireApi {
         };
     }
 
-    /// `input_tokens` includes cache reads.
+    /// `input_tokens` includes cache reads (and a gateway's cache writes).
     private static Usage usage(JsonObject u) {
         if (u.isEmpty()) return Usage.empty();
         var b = Usage.builder().raw(u);
-        long read = u.object("input_tokens_details").optLong("cached_tokens").orElse(0);
-        long written = u.object("input_tokens_details").optLong("cache_write_tokens").orElse(0);
-        u.optLong("input_tokens").ifPresent(i -> b.input(Math.max(0, i - read - written)).cacheRead(read).cacheWrite(written));
+        u.optLong("input_tokens").ifPresent(i -> CompletionsCodec.input(b, i, u.object("input_tokens_details").optLong("cached_tokens"),
+                u.object("input_tokens_details").optLong("cache_write_tokens")));
         u.optLong("output_tokens").ifPresent(b::output);
         u.object("output_tokens_details").optLong("reasoning_tokens").ifPresent(b::reasoning);
         u.optLong("total_tokens").ifPresent(b::total);
@@ -339,4 +352,25 @@ public final class ResponsesCodec implements WireApi {
     }
 
     @Override public String normalizeToolCallId(String foreignId) { return Codecs.toolCallId(foreignId, 64); }
+
+    @Override public ApiFeatures features(DecodeContext ctx) {
+        var compat = ctx.compat(OpenAiResponsesCompat.defaults());
+        return new ApiFeatures(ID, compat.maxOutputTokens() ? ApiFeatures.OutputCap.ENFORCED : ApiFeatures.OutputCap.UNSUPPORTED, MIN_OUTPUT,
+                ApiFeatures.PromptCache.AUTOMATIC, 0,
+                NO_CACHE_RETENTION.matcher(ctx.model().id()).matches() ? Set.of(CacheRetention.SHORT) : Set.of(CacheRetention.SHORT, CacheRetention.LONG),
+                compat.streamingOnly(), true, true, Set.of("input", "output", "reasoning", "cache_read", "cache_write"), false, true, true, true);
+    }
+
+    /// `responses/input_tokens` takes the members that make up the prompt.
+    @Override public Optional<HttpCall> countRequest(HttpCall request) {
+        if (!(request.body().orElse(null) instanceof JsonObject body)) return Optional.empty();
+        var counted = new LinkedHashMap<String, Object>();
+        for (var member : List.of("model", "instructions", "input", "tools", "tool_choice", "parallel_tool_calls", "reasoning", "text", "previous_response_id"))
+            body.get(member).ifPresent(v -> counted.put(member, v));
+        return Optional.of(HttpCall.post("responses/input_tokens", Json.valueOf(counted)).withHeaders(request.headers()));
+    }
+
+    @Override public OptionalLong countReply(HttpReply reply) {
+        return reply.json() instanceof JsonObject json ? json.optLong("input_tokens") : OptionalLong.empty();
+    }
 }

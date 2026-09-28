@@ -5,10 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.util.List;
+import java.util.Map;
 
 import net.ai.gate.cache.CacheRetention;
+import net.ai.gate.chat.AssistantMessage;
 import net.ai.gate.chat.Conversation;
 import net.ai.gate.chat.StopReason;
 import net.ai.gate.chat.content.Content;
@@ -21,9 +24,14 @@ import net.ai.gate.chat.tool.ToolChoice;
 import net.ai.gate.error.ErrorCode;
 import net.ai.gate.error.InvalidRequestException;
 import net.ai.gate.error.ProviderException;
+import net.ai.gate.error.TransportException;
 import net.ai.gate.json.Json;
 import net.ai.gate.json.JsonNull;
+import net.ai.gate.json.JsonObject;
+import net.ai.gate.metadata.TokenCount;
+import net.ai.gate.model.Prices;
 import net.ai.gate.model.ReasoningLevel;
+import net.ai.gate.spi.protocol.ApiFeatures;
 import net.ai.gate.vendors.WireScript;
 import org.junit.jupiter.api.Test;
 
@@ -216,6 +224,132 @@ class AnthropicWireTest {
                     required.toBuilder().strict(true).build()));
             assertEquals(ErrorCode.UNSUPPORTED_FEATURE, strict.code());
             assertEquals(3, wire.calls().size());
+        }
+    }
+
+    @Test
+    void anInterruptedToolCallKeepsTheObservedUsageAndIsNeverReplayed() {
+        var wire = new WireScript().sse(
+                "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_3\",\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":300,\"cache_creation_input_tokens\":0,\"output_tokens\":1}}}",
+                "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+                "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Checking.\"}}",
+                "{\"type\":\"content_block_stop\",\"index\":0}",
+                "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_3\",\"name\":\"weather\",\"input\":{}}}",
+                "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"ci\"}}")
+                .json(REPLY);
+        try (var llm = wire.runtime(Anthropic.provider(), "ANTHROPIC_API_KEY")) {
+            var model = llm.model("anthropic", "claude-sonnet-4-5");
+            var error = assertThrows(TransportException.class, () -> llm.stream(model, ASK).result());
+            var partial = error.partial().orElseThrow();
+            assertEquals(12, partial.usage().input().orElseThrow());
+            assertEquals(300, partial.usage().cacheRead().orElseThrow());
+            assertFalse(partial.usage().finalForCall());
+            assertEquals(List.of(1), partial.incompleteParts());
+            assertEquals("toolu_3", partial.toolCalls().getFirst().id(), "the real id, for rendering");
+
+            llm.complete(model, ASK.append(partial).appendUser("Go on."));
+            var replayed = wire.body(1).objects("messages").get(1).objects("content");
+            assertEquals(List.of(Json.object("type", "text", "text", "Checking.")), replayed, "the cut-off tool call is omitted");
+        }
+    }
+
+    @Test
+    void cacheWritesAreSplitByTtlAndAbsentCountersStayAbsent() {
+        var classes = REPLY.replace("\"cache_creation_input_tokens\":5,",
+                "\"cache_creation_input_tokens\":5,\"cache_creation\":{\"ephemeral_5m_input_tokens\":2,\"ephemeral_1h_input_tokens\":3},");
+        var gateway = REPLY.replace("\"cache_read_input_tokens\":100,\"cache_creation_input_tokens\":5,", "");
+        var wire = new WireScript().json(classes).json(gateway);
+        try (var llm = wire.runtime(Anthropic.provider(), "ANTHROPIC_API_KEY")) {
+            var model = llm.model("anthropic", "claude-sonnet-4-5");
+            var usage = llm.complete(model, ASK).usage();
+            assertEquals(Map.of(CacheRetention.SHORT, 2L, CacheRetention.LONG, 3L), usage.cacheWrites());
+            assertEquals(5, usage.cacheWrite().orElseThrow());
+            var prices = Prices.usd().input("3").output("15").cacheRead("0.3").cacheWrite("3.75").cacheWriteLong("6").build();
+            assertEquals(new BigDecimal("0.0000255"), prices.cost(usage).orElseThrow().cacheWrite().stripTrailingZeros(), "2 × 3.75 + 3 × 6 per million");
+            assertEquals(new BigDecimal("0.00001875"), Prices.usd().input("3").output("15").cacheRead("0.3").cacheWrite("3.75").build()
+                    .cost(usage).orElseThrow().cacheWrite().stripTrailingZeros(), "without a 1-hour price every write costs the same");
+
+            var unreported = llm.complete(model, ASK).usage();
+            assertTrue(unreported.cacheRead().isEmpty());
+            assertTrue(unreported.cacheWrite().isEmpty());
+            assertTrue(unreported.totalInput().isEmpty(), "no wrong total");
+        }
+    }
+
+    @Test
+    void breakpointsCarryTheirOwnTtlLongerFirst() {
+        var ok = REPLY.replace("tool_use\",\n", "end_turn\",\n");
+        var wire = new WireScript().json(ok).json(ok);
+        var stable = Conversation.builder().system("Stable instructions.").cacheBreakpoint(CacheRetention.LONG)
+                .user("First question").cacheBreakpoint().build();
+        try (var llm = wire.runtime(Anthropic.provider(), "ANTHROPIC_API_KEY")) {
+            var model = llm.model("anthropic", "claude-sonnet-4-5");
+            llm.complete(model, stable);
+            assertEquals(Json.object("type", "ephemeral", "ttl", "1h"), wire.body(0).objects("system").getFirst().object("cache_control"));
+            assertEquals(Json.object("type", "ephemeral"), wire.body(0).objects("messages").getFirst().objects("content").getLast().object("cache_control"));
+
+            var inverted = Conversation.builder().system("Stable instructions.").cacheBreakpoint().user("q").cacheBreakpoint(CacheRetention.LONG).build();
+            var reply = llm.complete(model, inverted);
+            assertTrue(reply.warnings().stream().anyMatch(w -> w.code().equals("cache_hint_ignored")), reply.warnings().toString());
+            assertEquals(Json.object("type", "ephemeral"), wire.body(1).objects("messages").getFirst().objects("content").getLast().object("cache_control"));
+            assertThrows(InvalidRequestException.class, () -> llm.complete(model, inverted, ChatOptions.builder().strict().build()));
+            assertEquals(Conversation.fromJson(stable.toJson()), stable);
+            assertEquals("ai-gate.conversation/2", stable.toJson().string("schema"));
+        }
+    }
+
+    @Test
+    void raisingMaxTokensAboveTheBudgetIsAnAdaptationAndTheLimitIsReported() {
+        try (var llm = new WireScript().runtime(Anthropic.provider(), "ANTHROPIC_API_KEY")) {
+            var model = llm.model("anthropic", "claude-sonnet-4-5-20250929");
+            var budget = ChatOptions.builder().reasoning(ReasoningLevel.MEDIUM).maxTokens(2000);
+            var prepared = llm.prepare(model, ASK, budget.build(), false);
+            assertEquals(8192 + 4096, prepared.effectiveOptions().maxTokens().orElseThrow());
+            assertTrue(prepared.request().warnings().stream().anyMatch(w -> w.code().equals("option_adapted")));
+            var strict = assertThrows(InvalidRequestException.class, () -> llm.prepare(model, ASK, budget.strict().build(), false));
+            assertEquals(ErrorCode.UNSUPPORTED_FEATURE, strict.code());
+            assertEquals(ApiFeatures.OutputCap.ENFORCED, llm.features(model).outputCap());
+            assertEquals(4, llm.features(model).maxCacheMarkers());
+        }
+    }
+
+    @Test
+    void aPreparedCallSendsItsPreviewedBodyAndCountsItsTokensAtTheEndpoint() {
+        var wire = new WireScript().json("{\"input_tokens\":1234}").json(REPLY).error(404, "{\"type\":\"error\",\"error\":{\"type\":\"not_found_error\",\"message\":\"no\"}}");
+        try (var llm = wire.runtime(Anthropic.provider(), "ANTHROPIC_API_KEY")) {
+            var prepared = llm.prepare(llm.model("anthropic", "claude-sonnet-4-5"), ASK, ChatOptions.builder().maxTokens(500).build(), false);
+            assertEquals(new TokenCount(1234, true, TokenCount.ENDPOINT, 0), llm.countTokens(prepared));
+            var counting = wire.calls().getFirst();
+            assertTrue(counting.uri().toString().endsWith("/v1/messages/count_tokens"), counting.uri().toString());
+            assertEquals("2023-06-01", counting.headers().get("anthropic-version"));
+            assertTrue(wire.body(0).get("max_tokens").isEmpty(), "count_tokens takes no output limit");
+            assertEquals(((JsonObject) prepared.request().body()).get("messages"), wire.body(0).get("messages"));
+
+            llm.complete(prepared);
+            assertEquals(prepared.request().body(), wire.body(1), "sent byte for byte as previewed");
+            assertEquals(TokenCount.ESTIMATE, llm.countTokens(prepared).method(), "a gateway without the endpoint falls back");
+        }
+    }
+
+    @Test
+    void aReplyArchivesWithRawUsageAndCallFactsAndReplaysUnchanged() {
+        var wire = new WireScript().json(REPLY).json(REPLY).json(REPLY);
+        try (var llm = wire.runtime(Anthropic.provider(), "ANTHROPIC_API_KEY")) {
+            var model = llm.model("anthropic", "claude-sonnet-4-5-20250929");
+            var options = ChatOptions.builder().reasoning(ReasoningLevel.MEDIUM).maxTokens(2000).build();
+            var reply = llm.complete(model, ASK, options);
+            var json = reply.toJson();
+            assertEquals("ai-gate.reply/1", json.string("schema"));
+            var restored = AssistantMessage.fromJson(json);
+            assertEquals(reply, restored);
+            assertEquals(reply.usage().raw(), restored.usage().raw());
+            assertEquals(reply.info().requestId(), restored.info().requestId());
+            assertEquals(reply.info().attemptsDetail(), restored.info().attemptsDetail());
+
+            var result = List.of(ToolResult.of(reply.toolCalls().getFirst(), "18°C"));
+            llm.complete(model, ASK.append(reply, result), options);
+            llm.complete(model, ASK.append(restored, result), options);
+            assertEquals(wire.body(1), wire.body(2), "the archived reply re-encodes to the same wire body");
         }
     }
 }

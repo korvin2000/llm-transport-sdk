@@ -10,6 +10,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
@@ -40,6 +42,7 @@ import net.ai.gate.metadata.Warning;
 import net.ai.gate.model.ReasoningLevel;
 import net.ai.gate.spi.http.HttpCall;
 import net.ai.gate.spi.http.HttpReply;
+import net.ai.gate.spi.protocol.ApiFeatures;
 import net.ai.gate.spi.protocol.ApiRequest;
 import net.ai.gate.spi.protocol.Codecs;
 import net.ai.gate.spi.protocol.DecodeContext;
@@ -53,7 +56,9 @@ import net.ai.gate.vendors.openai.OpenAiCompletionsCompat;
 /// whose differences are `OpenAiCompletionsCompat` flags, never base-URL sniffing. Reasoning arrives in
 /// `reasoning_content`, `reasoning` or `reasoning_text`, whichever the server uses. Audio output (`message.audio`,
 /// streamed as `delta.audio`) becomes `Content.Audio` with its transcript — `pcm16` when streamed, else the reply's
-/// `format` or `wav` — and replays as the transcript, since audio ids expire.
+/// `format` or `wav` — and replays as the transcript, since audio ids expire. Usage arrives in the last chunk (with
+/// `stream_options.include_usage`) as a `UsageUpdate` before the end; there is no counting endpoint. Replay keeps
+/// text, tool calls with their ids and raw arguments, and reasoning only where `reasoningContentReplay` is set.
 public final class CompletionsCodec implements WireApi {
     public static final CompletionsCodec INSTANCE = new CompletionsCodec();
     private static final String ID = "openai-completions";
@@ -270,13 +275,22 @@ public final class CompletionsCodec implements WireApi {
     static Usage usage(JsonObject u) {
         var b = Usage.builder().raw(u);
         var details = u.object("prompt_tokens_details");
-        long read = details.optLong("cached_tokens").orElse(u.optLong("prompt_cache_hit_tokens").orElse(0));
-        long written = details.optLong("cache_write_tokens").orElse(0);
-        u.optLong("prompt_tokens").ifPresent(p -> b.input(Math.max(0, p - read - written)).cacheRead(read).cacheWrite(written));
+        u.optLong("prompt_tokens").ifPresent(p -> input(b, p, details.optLong("cached_tokens").isPresent() ? details.optLong("cached_tokens")
+                : u.optLong("prompt_cache_hit_tokens"), details.optLong("cache_write_tokens")));
         u.optLong("completion_tokens").ifPresent(b::output);
         u.object("completion_tokens_details").optLong("reasoning_tokens").ifPresent(b::reasoning);
         u.optLong("total_tokens").ifPresent(b::total);
         return b.build();
+    }
+
+    /// The OpenAI family's input accounting: `total` includes cache reads and writes. Writes have no bucket of their
+    /// own — they are input — so they are `0` where the cache read is reported, unless a gateway states them; a counter
+    /// the reply leaves out stays absent.
+    static void input(Usage.Builder b, long total, OptionalLong read, OptionalLong written) {
+        b.input(Math.max(0, total - read.orElse(0) - written.orElse(0)));
+        read.ifPresent(b::cacheRead);
+        if (written.isPresent()) b.cacheWrite(written.getAsLong());
+        else if (read.isPresent()) b.cacheWrite(0);
     }
 
     @Override public StreamDecoder streamDecoder(DecodeContext ctx) {
@@ -300,7 +314,10 @@ public final class CompletionsCodec implements WireApi {
                     model = chunk.optString("model").orElse(null);
                     events.add(ChatEvent.Started.of(id, model));
                 }
-                if (chunk.get("usage").orElse(null) instanceof JsonObject u) usage = usage(u);
+                if (chunk.get("usage").orElse(null) instanceof JsonObject u) {
+                    usage = usage(u);
+                    events.add(new ChatEvent.UsageUpdate(usage));
+                }
                 for (var choice : chunk.objects("choices")) {
                     var delta = choice.object("delta");
                     reasoningOf(delta).ifPresent(r -> events.add(new ChatEvent.ReasoningDelta(index("reasoning"), r)));
@@ -349,4 +366,12 @@ public final class CompletionsCodec implements WireApi {
 
     /// Chat Completions limits tool-call ids to 40 characters.
     @Override public String normalizeToolCallId(String foreignId) { return Codecs.toolCallId(foreignId, 40); }
+
+    /// Anthropic-style markers are placed automatically (system, last message): explicit breakpoints are not honoured.
+    @Override public ApiFeatures features(DecodeContext ctx) {
+        var compat = ctx.compat(OpenAiCompletionsCompat.defaults());
+        return new ApiFeatures(ID, ApiFeatures.OutputCap.ENFORCED, 1, ApiFeatures.PromptCache.AUTOMATIC, 0, Set.of(CacheRetention.SHORT),
+                false, true, true, Set.of("input", "output", "reasoning", "cache_read", "cache_write"), compat.streamUsage(),
+                compat.reasoningContentReplay(), false, false);
+    }
 }

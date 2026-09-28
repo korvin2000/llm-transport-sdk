@@ -1,5 +1,8 @@
 package net.ai.gate.spi.protocol;
 
+import java.util.Optional;
+import java.util.OptionalLong;
+
 import net.ai.gate.chat.AssistantMessage;
 import net.ai.gate.error.LlmException;
 import net.ai.gate.internal.http.HttpErrors;
@@ -40,4 +43,14 @@ public interface WireApi {
 
     /// A tool-call id produced by another API, made acceptable to this one (hand-off).
     default String normalizeToolCallId(String foreignId) { return foreignId; }
+
+    /// What this API does with requests for `ctx.model()` under the merged compat flags. Conservative by default.
+    default ApiFeatures features(DecodeContext ctx) { return ApiFeatures.unknown(id()); }
+
+    /// The request that counts the input tokens of `request` (as encoded by [#encode]) at the provider, with a URI
+    /// relative to the base URL; empty when the API has no counting endpoint.
+    default Optional<HttpCall> countRequest(HttpCall request) { return Optional.empty(); }
+
+    /// The input tokens in the reply to [#countRequest]; empty when the reply does not state them.
+    default OptionalLong countReply(HttpReply reply) { return OptionalLong.empty(); }
 }

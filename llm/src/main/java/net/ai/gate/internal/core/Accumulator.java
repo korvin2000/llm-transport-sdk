@@ -11,13 +11,15 @@ import net.ai.gate.chat.content.ToolCall;
 import net.ai.gate.chat.content.ToolResult;
 import net.ai.gate.chat.stream.ChatEvent;
 import net.ai.gate.internal.json.JsonReader;
+import net.ai.gate.metadata.Usage;
 import net.ai.gate.model.ModelRef;
 import org.jspecify.annotations.Nullable;
 
 /// Aggregates stream events into the reply `complete()` would return: parts by index (they may interleave), deltas
 /// until the authoritative `PartEnd`, partial tool arguments parsed from the fragments so far. Every retained form
-/// — deltas, authoritative parts, native and unknown payloads — is charged against [#LIMIT_CHARS] (characters).
-/// Confined to the consuming thread; [#snapshot()] may be read from any thread.
+/// — deltas, authoritative parts, native and unknown payloads — is charged against [#LIMIT_CHARS] (characters). A
+/// snapshot carries the last usage update and marks tool calls and reasoning that never got their `PartEnd` as
+/// incomplete. Confined to the consuming thread; [#snapshot()] may be read from any thread.
 final class Accumulator {
     static final long LIMIT_CHARS = 32L << 20;
 
@@ -45,7 +47,8 @@ final class Accumulator {
     private final String api;
     private final TreeMap<Integer, Part> parts = new TreeMap<>();
     private @Nullable String responseId, responseModel;
-    private long size;
+    private @Nullable Usage observed;
+    private long size, outputChars;
 
     Accumulator(ModelRef model, String api) { this.model = model; this.api = api; }
 
@@ -78,14 +81,35 @@ final class Accumulator {
             }
             case ChatEvent.Done d -> ChatEvent.Done.of(aggregate(d.message()));
             case ChatEvent.Unknown u -> { charge(u.raw().toJson().length()); yield u; }
+            case ChatEvent.UsageUpdate u -> {
+                var update = u.observed().toBuilder().finalForCall(false).build();
+                observed = update;
+                yield new ChatEvent.UsageUpdate(update);
+            }
         };
     }
 
-    /// What arrived so far, as an appendable reply.
+    /// What arrived so far, as an appendable reply: parts cut off are marked, and never sent back to a model.
     synchronized AssistantMessage snapshot() {
-        return AssistantMessage.builder(model, api).content(contents()).stopReason(StopReason.ABORTED)
-                .responseId(responseId).responseModel(responseModel).build();
+        var b = AssistantMessage.builder(model, api).content(contents()).stopReason(StopReason.ABORTED)
+                .responseId(responseId).responseModel(responseModel);
+        if (observed != null) b.usage(observed);
+        int index = 0;
+        for (var part : parts.values()) {
+            if (part.done == null && part.kind != Kind.TEXT) b.incompletePart(index);
+            index++;
+        }
+        return b.build();
     }
+
+    /// Output tokens of the last usage update, if it reported them.
+    synchronized @Nullable Long outputTokens() {
+        var usage = observed;
+        return usage == null || usage.output().isEmpty() ? null : usage.output().getAsLong();
+    }
+
+    /// Characters of text, reasoning and tool-argument deltas so far.
+    synchronized long outputChars() { return outputChars; }
 
     private AssistantMessage aggregate(AssistantMessage fromDecoder) {
         var b = fromDecoder.toBuilder();
@@ -103,6 +127,7 @@ final class Accumulator {
 
     private Part append(int index, Kind kind, String delta) {
         charge(delta.length());
+        outputChars += delta.length();
         var part = part(index, kind);
         part.text.append(delta);
         return part;

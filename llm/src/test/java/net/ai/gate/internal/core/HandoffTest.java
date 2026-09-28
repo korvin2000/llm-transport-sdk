@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 
 import net.ai.gate.chat.AssistantMessage;
 import net.ai.gate.chat.Conversation;
@@ -16,6 +17,7 @@ import net.ai.gate.chat.UserMessage;
 import net.ai.gate.chat.content.Content;
 import net.ai.gate.chat.content.ToolCall;
 import net.ai.gate.chat.content.ToolResult;
+import net.ai.gate.chat.options.HistoryPolicy;
 import net.ai.gate.chat.options.ReasoningHandoff;
 import net.ai.gate.error.InvalidRequestException;
 import net.ai.gate.json.Json;
@@ -40,9 +42,9 @@ class HandoffTest {
     void foreignReasoningTextIsKeptAsThinkingTextAndSignaturesNeverCross() {
         var reply = fromGpt(Content.Reasoning.of("Plan the answer.", "gpt-signature", false, JsonNull.INSTANCE), Content.text("450"));
         var conversation = Conversation.of("25 * 18?").append(reply).appendUser("Sure?");
-        var notes = new Notes(false);
+        var notes = new Notes(false, Set.of());
 
-        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, notes);
+        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, HistoryPolicy.ALLOW_ADAPTATION, notes);
 
         var turn = assertInstanceOf(AssistantMessage.class, adapted.messages().get(1));
         assertEquals(List.of(Content.text("<thinking>Plan the answer.</thinking>"), Content.text("450")), turn.content());
@@ -54,22 +56,22 @@ class HandoffTest {
     @Test
     void dropOmitsForeignReasoningButNeverSameOriginReasoning() {
         var foreign = fromGpt(Content.reasoning("Plan."), Content.text("450"));
-        var dropped = Handoff.adapt(Conversation.of("q").append(foreign), Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.DROP, new Notes(false));
+        var dropped = Handoff.adapt(Conversation.of("q").append(foreign), Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.DROP, HistoryPolicy.ALLOW_ADAPTATION, new Notes(false, Set.of()));
         assertEquals(List.of(Content.text("450")), ((AssistantMessage) dropped.messages().get(1)).content());
 
         var own = AssistantMessage.builder(CLAUDE.ref(), Anthropic.MESSAGES.id())
                 .content(List.of(Content.Reasoning.of("Plan.", "sig", false, JsonNull.INSTANCE), Content.text("450"))).build();
         var sameOrigin = Conversation.of("q").append(own);
-        assertSame(own, Handoff.adapt(sameOrigin, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.DROP, new Notes(false)).messages().get(1));
+        assertSame(own, Handoff.adapt(sameOrigin, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.DROP, HistoryPolicy.ALLOW_ADAPTATION, new Notes(false, Set.of())).messages().get(1));
     }
 
     @Test
     void toolCallIdsAreNormalizedForTheTargetApiAndResultsFollow() {
         var call = ToolCall.of("fc_" + "x".repeat(300) + ":1", "read_file", Json.object("path", "a.txt"));
         var conversation = Conversation.of("read").append(fromGpt(call), List.of(ToolResult.of(call, "hello")));
-        var notes = new Notes(false);
+        var notes = new Notes(false, Set.of());
 
-        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, notes);
+        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, HistoryPolicy.ALLOW_ADAPTATION, notes);
 
         var id = ((AssistantMessage) adapted.messages().get(1)).toolCalls().getFirst().id();
         assertTrue(id.matches("[a-zA-Z0-9_-]{1,64}"), id);
@@ -80,20 +82,20 @@ class HandoffTest {
     @Test
     void imagesBecomePlaceholdersForTextOnlyModelsOrFailWhenStrict() {
         var conversation = Conversation.builder().user(Content.text("What is this?"), Content.image(Path.of("photo.png"))).build();
-        var notes = new Notes(false);
-        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, TEXT_ONLY, ReasoningHandoff.KEEP, notes);
+        var notes = new Notes(false, Set.of());
+        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, TEXT_ONLY, ReasoningHandoff.KEEP, HistoryPolicy.ALLOW_ADAPTATION, notes);
         assertEquals(Content.text(Handoff.IMAGE_PLACEHOLDER), ((UserMessage) adapted.messages().getFirst()).content().get(1));
         assertTrue(notes.warnings().stream().anyMatch(w -> w.code().equals("image_omitted")));
         assertThrows(InvalidRequestException.class,
-                () -> Handoff.adapt(conversation, Anthropic.MESSAGES, TEXT_ONLY, ReasoningHandoff.KEEP, new Notes(true)));
+                () -> Handoff.adapt(conversation, Anthropic.MESSAGES, TEXT_ONLY, ReasoningHandoff.KEEP, HistoryPolicy.ALLOW_ADAPTATION, new Notes(true, Set.of())));
     }
 
     @Test
     void breakpointsAreRemappedPastDroppedTurns() {
         var conversation = Conversation.builder().user("q").message(fromGpt()).cacheBreakpoint().user("more").build();
         assertEquals(List.of(2), conversation.cacheBreakpoints());
-        var notes = new Notes(false);
-        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, notes);
+        var notes = new Notes(false, Set.of());
+        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, HistoryPolicy.ALLOW_ADAPTATION, notes);
         assertEquals(2, adapted.messages().size());
         assertEquals(List.of(1), adapted.cacheBreakpoints(), "the empty turn before the marker was dropped");
         assertTrue(notes.notes().stream().anyMatch(n -> n.code().equals("cache_breakpoints_remapped")));
@@ -105,7 +107,7 @@ class HandoffTest {
         var first = ToolCall.of("call:1", "a", Json.object());
         var second = ToolCall.of("call_1", "b", Json.object());
         var conversation = Conversation.of("go").append(fromGpt(first, second), List.of(ToolResult.of(first, "r1"), ToolResult.of(second, "r2")));
-        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, new Notes(false));
+        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, HistoryPolicy.ALLOW_ADAPTATION, new Notes(false, Set.of()));
         var calls = ((AssistantMessage) adapted.messages().get(1)).toolCalls();
         assertEquals(2, calls.stream().map(ToolCall::id).distinct().count(), calls.toString());
         var results = ((ToolResultMessage) adapted.messages().get(2)).results();
@@ -118,7 +120,7 @@ class HandoffTest {
         var conversation = Conversation.of("q")
                 .append(fromGpt(Content.Refusal.of("I can't."), Content.Unknown.of("audio_transcript", Json.object())))
                 .append(fromGpt());
-        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, new Notes(false));
+        var adapted = Handoff.adapt(conversation, Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, HistoryPolicy.ALLOW_ADAPTATION, new Notes(false, Set.of()));
         assertEquals(2, adapted.messages().size());
         assertEquals(List.of(Content.text("I can't.")), ((AssistantMessage) adapted.messages().get(1)).content());
     }
@@ -127,8 +129,8 @@ class HandoffTest {
     void foreignGeneratedMediaNeverReachesAnotherModel() {
         var reply = fromGpt(Content.text("Here."), Content.image(new byte[] {1}, "image/png"), Content.Audio.of(new byte[] {2}, "wav", "Hello!"),
                 Content.Audio.of(new byte[] {3}, "wav", null));
-        var notes = new Notes(false);
-        var adapted = Handoff.adapt(Conversation.of("Draw").append(reply), Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, notes);
+        var notes = new Notes(false, Set.of());
+        var adapted = Handoff.adapt(Conversation.of("Draw").append(reply), Anthropic.MESSAGES, CLAUDE, ReasoningHandoff.KEEP, HistoryPolicy.ALLOW_ADAPTATION, notes);
         assertEquals(List.of(Content.text("Here."), Content.text("Hello!")), ((AssistantMessage) adapted.messages().get(1)).content(),
                 "images are omitted, audio becomes its transcript");
         assertTrue(notes.warnings().stream().anyMatch(w -> w.code().equals("history_adapted")));

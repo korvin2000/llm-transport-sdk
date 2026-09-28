@@ -5,15 +5,17 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import net.ai.gate.error.ErrorCode;
+import net.ai.gate.metadata.Attempt;
 import net.ai.gate.metadata.Cost;
 import net.ai.gate.metadata.Usage;
 import net.ai.gate.metadata.Warning;
 import net.ai.gate.model.ModelRef;
 import org.jspecify.annotations.Nullable;
 
-/// The lifecycle of one call: `Started` → `FirstOutput`? → `Retrying`* → `Finished`, in order.
+/// The lifecycle of one call: `Started` → `Retrying`* → `FirstOutput`? → `Progress`* → `Finished`, in order.
 public sealed interface RequestEvent extends LlmEvent {
     String requestId();
     String providerId();
@@ -52,6 +54,29 @@ public sealed interface RequestEvent extends LlmEvent {
         public Duration latency() { return latency; }
     }
 
+    /// A stream is producing output: emitted at most every [#INTERVAL] from the stream loop, so a host that owns the
+    /// stream can show "the model is typing" to a UI subscribed only to events. Content-free, like every event.
+    final class Progress extends CallEventBase implements RequestEvent {
+        public static final Duration INTERVAL = Duration.ofMillis(250);
+
+        private final @Nullable Long outputTokens;
+        private final long outputChars;
+
+        private Progress(String requestId, ModelRef model, Map<String, String> tags, Instant at, @Nullable Long outputTokens, long outputChars) {
+            super(requestId, model, tags, at);
+            this.outputTokens = outputTokens; this.outputChars = outputChars;
+        }
+
+        public static Progress of(String requestId, ModelRef model, Map<String, String> tags, Instant at, @Nullable Long outputTokens, long outputChars) {
+            return new Progress(requestId, model, tags, at, outputTokens, outputChars);
+        }
+
+        /// Output tokens reported so far by the provider, where it reports them while streaming.
+        public OptionalLong outputTokens() { return outputTokens == null ? OptionalLong.empty() : OptionalLong.of(outputTokens); }
+        /// Characters of text, reasoning and tool arguments received so far.
+        public long outputChars() { return outputChars; }
+    }
+
     final class Retrying extends CallEventBase implements RequestEvent {
         private final int attempt;
         private final Duration delay;
@@ -84,6 +109,7 @@ public sealed interface RequestEvent extends LlmEvent {
         private final Duration latency;
         private final @Nullable Duration timeToFirstOutput;
         private final int attempts;
+        private final List<Attempt> attemptsDetail;
         private final List<Warning> warnings;
         private final boolean fromCache, outcomeUnknown;
         private final @Nullable ErrorCode errorCode;
@@ -92,7 +118,7 @@ public sealed interface RequestEvent extends LlmEvent {
         private Finished(Builder b) {
             super(b.requestId, b.model, b.tags, b.at);
             outcome = b.outcome; usage = b.usage; latency = b.latency; timeToFirstOutput = b.timeToFirstOutput;
-            attempts = b.attempts; warnings = List.copyOf(b.warnings); fromCache = b.fromCache;
+            attempts = b.attempts; attemptsDetail = List.copyOf(b.attemptsDetail); warnings = List.copyOf(b.warnings); fromCache = b.fromCache;
             outcomeUnknown = b.outcomeUnknown; errorCode = b.errorCode; providerRequestId = b.providerRequestId;
         }
 
@@ -106,6 +132,8 @@ public sealed interface RequestEvent extends LlmEvent {
         public Duration latency() { return latency; }
         public Optional<Duration> timeToFirstOutput() { return Optional.ofNullable(timeToFirstOutput); }
         public int attempts() { return attempts; }
+        /// One entry per attempt, in order.
+        public List<Attempt> attemptsDetail() { return attemptsDetail; }
         public List<Warning> warnings() { return warnings; }
         public boolean fromCache() { return fromCache; }
         public Optional<ErrorCode> errorCode() { return Optional.ofNullable(errorCode); }
@@ -125,6 +153,7 @@ public sealed interface RequestEvent extends LlmEvent {
             private Duration latency = Duration.ZERO;
             private @Nullable Duration timeToFirstOutput;
             private int attempts;
+            private List<Attempt> attemptsDetail = List.of();
             private List<Warning> warnings = List.of();
             private boolean fromCache, outcomeUnknown;
             private @Nullable ErrorCode errorCode;
@@ -138,6 +167,7 @@ public sealed interface RequestEvent extends LlmEvent {
             public Builder latency(Duration value) { latency = value; return this; }
             public Builder timeToFirstOutput(@Nullable Duration value) { timeToFirstOutput = value; return this; }
             public Builder attempts(int value) { attempts = value; return this; }
+            public Builder attemptsDetail(List<Attempt> values) { attemptsDetail = values; return this; }
             public Builder warnings(List<Warning> values) { warnings = values; return this; }
             public Builder fromCache(boolean value) { fromCache = value; return this; }
             public Builder outcomeUnknown(boolean value) { outcomeUnknown = value; return this; }

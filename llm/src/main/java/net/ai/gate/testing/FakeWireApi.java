@@ -7,7 +7,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
+import net.ai.gate.cache.CacheRetention;
 import net.ai.gate.chat.AssistantMessage;
 import net.ai.gate.chat.StopReason;
 import net.ai.gate.chat.ToolResultMessage;
@@ -29,6 +31,7 @@ import net.ai.gate.metadata.Usage;
 import net.ai.gate.model.Model;
 import net.ai.gate.spi.http.HttpCall;
 import net.ai.gate.spi.http.HttpReply;
+import net.ai.gate.spi.protocol.ApiFeatures;
 import net.ai.gate.spi.protocol.ApiRequest;
 import net.ai.gate.spi.protocol.DecodeContext;
 import net.ai.gate.spi.protocol.EncodeContext;
@@ -119,6 +122,7 @@ final class FakeWireApi implements WireApi {
                     case "tool_start" -> List.of(new ChatEvent.ToolCallStart(index, data.string("id"), data.string("name")));
                     case "tool_delta" -> List.of(new ChatEvent.ToolCallDelta(index, data.string("fragment"), Json.object()));
                     case "part_end" -> List.of(new ChatEvent.PartEnd(index, part(data.object("part"))));
+                    case "usage" -> List.of(new ChatEvent.UsageUpdate(usage(data)));
                     case "done" -> {
                         done = true;
                         yield List.of(ChatEvent.Done.of(message(ctx.model(), data).build()));
@@ -143,15 +147,23 @@ final class FakeWireApi implements WireApi {
                 .outcomeUnknown(defaults.outcomeUnknown()).build();
     }
 
+    @Override public ApiFeatures features(DecodeContext ctx) {
+        return new ApiFeatures(ID, ApiFeatures.OutputCap.ENFORCED, 1, ApiFeatures.PromptCache.AUTOMATIC, 0, Set.of(CacheRetention.SHORT),
+                false, true, false, Set.of("input", "output", "cache_read", "cache_write"), true, false, false, false);
+    }
+
     private AssistantMessage.Builder message(Model model, JsonObject json) {
-        var usage = json.object("usage");
+        return AssistantMessage.builder(model.ref(), ID).stopReason(StopReason.of(json.string("stop"))).usage(usage(json.object("usage")))
+                .responseId(json.get("id").orElse(null) instanceof JsonString s ? s.value() : null);
+    }
+
+    private static Usage usage(JsonObject usage) {
         var b = Usage.builder().raw(usage);
         if (usage.get("input").orElse(null) instanceof JsonNumber n) b.input(n.longValue());
         if (usage.get("output").orElse(null) instanceof JsonNumber n) b.output(n.longValue());
         if (usage.get("cacheRead").orElse(null) instanceof JsonNumber n) b.cacheRead(n.longValue());
         if (usage.get("cacheWrite").orElse(null) instanceof JsonNumber n) b.cacheWrite(n.longValue());
-        return AssistantMessage.builder(model.ref(), ID).stopReason(StopReason.of(json.string("stop"))).usage(b.build())
-                .responseId(json.get("id").orElse(null) instanceof JsonString s ? s.value() : null);
+        return b.build();
     }
 
     /// The wire form of a content part.

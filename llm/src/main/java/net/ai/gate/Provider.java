@@ -13,6 +13,8 @@ import java.util.function.Consumer;
 import net.ai.gate.auth.ApiKeyAuth;
 import net.ai.gate.auth.oauth.OAuthAuth;
 import net.ai.gate.chat.options.ChatOptions;
+import net.ai.gate.config.FieldDescriptor;
+import net.ai.gate.config.FieldDescriptor.Kind;
 import net.ai.gate.internal.validation.Checks;
 import net.ai.gate.model.Model;
 import net.ai.gate.spi.catalog.ModelSource;
@@ -84,6 +86,17 @@ public final class Provider {
     public Optional<String> preset() { return Optional.ofNullable(preset); }
     /// A provider-bound transport (in-process servers, test fakes); the runtime's transport otherwise. Borrowed.
     public Optional<HttpTransport> transport() { return Optional.ofNullable(transport); }
+
+    /// The form of this provider's `ProvidersConfig` entry, current values as defaults: name, base URL, headers and —
+    /// in group `Compatibility`, under the entry's `compat` member — the flags of its compat type. No I/O.
+    public List<FieldDescriptor> fields() {
+        var fields = new ArrayList<FieldDescriptor>();
+        fields.add(FieldDescriptor.builder("name", Kind.TEXT).label("Name").group("Connection").defaultValue(name).build());
+        fields.add(FieldDescriptor.builder("baseUrl", Kind.URL).label("Base URL").group("Connection").required().defaultValue(baseUrl.toString()).build());
+        fields.add(FieldDescriptor.builder("headers", Kind.JSON).label("Headers").group("Connection").help("Sent with every request; never credentials").build());
+        compat().ifPresent(c -> fields.addAll(c.fields()));
+        return List.copyOf(fields);
+    }
 
     public Builder toBuilder() {
         var b = new Builder(id);

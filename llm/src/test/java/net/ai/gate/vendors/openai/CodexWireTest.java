@@ -20,6 +20,7 @@ import net.ai.gate.error.ErrorCode;
 import net.ai.gate.error.RateLimitedException;
 import net.ai.gate.json.Json;
 import net.ai.gate.model.ReasoningLevel;
+import net.ai.gate.spi.protocol.ApiFeatures;
 import net.ai.gate.vendors.WireScript;
 import org.junit.jupiter.api.Test;
 
@@ -79,6 +80,20 @@ class CodexWireTest {
             var error = assertThrows(RateLimitedException.class, () -> llm.complete(llm.model("openai-codex", "gpt-5.5"), "Hello"));
             assertEquals(ErrorCode.QUOTA_EXHAUSTED, error.code());
             assertEquals(1, wire.calls().size(), "waiting does not refill a plan");
+        }
+    }
+
+    @Test
+    void theCodexBackendDeclaresItsUnenforcedOutputCapAndReportsNoCacheCounters() {
+        var wire = new WireScript().sse(EVENTS.toArray(String[]::new));
+        try (var llm = runtime(wire)) {
+            var model = llm.model("openai-codex", "gpt-5.5");
+            var features = llm.features(model);
+            assertEquals(ApiFeatures.OutputCap.UNSUPPORTED, features.outputCap(), "discoverable before the call");
+            assertTrue(features.streamingRequired());
+            var usage = llm.complete(model, Conversation.of("Hello")).usage();
+            assertTrue(usage.cacheRead().isEmpty(), "not reported, so not zero");
+            assertTrue(usage.totalInput().isEmpty());
         }
     }
 }

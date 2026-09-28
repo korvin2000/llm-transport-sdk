@@ -58,6 +58,8 @@ public final class ScriptedReply {
         public Builder toolCall(String name, JsonObject arguments) { parts.add(ToolCall.of("call_" + (++calls), name, arguments)); return this; }
         public Builder part(Content part) { parts.add(part); return this; }
         public Builder usage(long input, long output) { usage = Usage.builder().input(input).output(output).cacheRead(0).cacheWrite(0).build(); return this; }
+        /// Input, output and cache counters as given; absent ones are served as `0`.
+        public Builder usage(Usage value) { usage = value; return this; }
         public Builder stopReason(StopReason reason) { stopReason = reason; return this; }
         /// See [ScriptedReply#truncated()].
         public Builder truncated() { truncated = true; return this; }

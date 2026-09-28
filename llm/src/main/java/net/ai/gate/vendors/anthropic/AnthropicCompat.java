@@ -1,5 +1,8 @@
 package net.ai.gate.vendors.anthropic;
 
+import java.util.List;
+
+import net.ai.gate.config.FieldDescriptor;
 import net.ai.gate.json.JsonObject;
 import net.ai.gate.spi.protocol.ApiCompat;
 import org.jspecify.annotations.Nullable;
@@ -45,6 +48,11 @@ public final class AnthropicCompat implements ApiCompat {
     }
 
     @Override public JsonObject toJson() { return ApiCompat.json("betaHeaders", betaHeaders, "cacheTtl", cacheTtl); }
+
+    @Override public List<FieldDescriptor> fields() {
+        return List.of(ApiCompat.flagField("betaHeaders", "Beta headers", true, "The endpoint accepts anthropic-beta headers"),
+                ApiCompat.flagField("cacheTtl", "Extended cache TTL", true, "The endpoint accepts 1-hour cache markers"));
+    }
 
     @Override public boolean equals(Object o) { return o instanceof AnthropicCompat c && toJson().equals(c.toJson()); }
     @Override public int hashCode() { return toJson().hashCode(); }

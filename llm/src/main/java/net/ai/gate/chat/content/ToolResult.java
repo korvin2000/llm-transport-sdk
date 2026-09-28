@@ -9,7 +9,7 @@ import net.ai.gate.json.Json;
 import net.ai.gate.json.JsonValue;
 import org.jspecify.annotations.Nullable;
 
-/// Immutable answer of the host to one [ToolCall]; id and tool name are taken from the call.
+/// Immutable answer of the host to one [ToolCall], carrying its id and tool name.
 public final class ToolResult implements Content {
     private final String callId, toolName;
     private final List<Content> content;
@@ -27,6 +27,11 @@ public final class ToolResult implements Content {
     public static ToolResult of(ToolCall call, List<Content> parts) { return new ToolResult(call.id(), call.name(), parts, false); }
     public static ToolResult error(ToolCall call, String message) {
         return new ToolResult(call.id(), call.name(), List.of(Content.text(message)), true);
+    }
+    /// For hosts that keep their own history items: the call's id and tool name without its [ToolCall]; an error
+    /// result may carry any parts.
+    public static ToolResult of(String callId, String toolName, List<Content> parts, boolean error) {
+        return new ToolResult(Checks.notBlank(callId, "Tool call id"), Checks.notBlank(toolName, "Tool name"), parts, error);
     }
 
     public String callId() { return callId; }

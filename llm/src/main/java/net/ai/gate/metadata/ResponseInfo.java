@@ -1,6 +1,7 @@
 package net.ai.gate.metadata;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 
 import net.ai.gate.json.JsonValue;
@@ -13,6 +14,7 @@ public final class ResponseInfo {
     private final String requestId, providerId;
     private final @Nullable String providerRequestId, route;
     private final int attempts;
+    private final List<Attempt> attemptsDetail;
     private final Duration latency;
     private final @Nullable Duration timeToFirstOutput;
     private final boolean fromCache;
@@ -21,7 +23,7 @@ public final class ResponseInfo {
 
     private ResponseInfo(Builder b) {
         requestId = b.requestId; providerId = b.providerId; providerRequestId = b.providerRequestId; route = b.route;
-        attempts = b.attempts; latency = b.latency; timeToFirstOutput = b.timeToFirstOutput; fromCache = b.fromCache;
+        attempts = b.attempts; attemptsDetail = b.attemptsDetail; latency = b.latency; timeToFirstOutput = b.timeToFirstOutput; fromCache = b.fromCache;
         rateLimits = b.rateLimits; rawBody = b.rawBody;
     }
 
@@ -37,6 +39,8 @@ public final class ResponseInfo {
     /// The upstream a gateway reports it used.
     public Optional<String> route() { return Optional.ofNullable(route); }
     public int attempts() { return attempts; }
+    /// One entry per attempt, in order; empty for replies not obtained by a call (cached, deserialized, constructed).
+    public List<Attempt> attemptsDetail() { return attemptsDetail; }
     public Duration latency() { return latency; }
     public Optional<Duration> timeToFirstOutput() { return Optional.ofNullable(timeToFirstOutput); }
     public boolean fromCache() { return fromCache; }
@@ -46,7 +50,7 @@ public final class ResponseInfo {
 
     public Builder toBuilder() {
         return new Builder(requestId, providerId).providerRequestId(providerRequestId).route(route).attempts(attempts)
-                .latency(latency).timeToFirstOutput(timeToFirstOutput).fromCache(fromCache).rateLimits(rateLimits).rawBody(rawBody);
+                .attemptsDetail(attemptsDetail).latency(latency).timeToFirstOutput(timeToFirstOutput).fromCache(fromCache).rateLimits(rateLimits).rawBody(rawBody);
     }
 
     @Override public String toString() {
@@ -59,6 +63,7 @@ public final class ResponseInfo {
         private final String requestId, providerId;
         private @Nullable String providerRequestId, route;
         private int attempts;
+        private List<Attempt> attemptsDetail = List.of();
         private Duration latency = Duration.ZERO;
         private @Nullable Duration timeToFirstOutput;
         private boolean fromCache;
@@ -70,6 +75,7 @@ public final class ResponseInfo {
         public Builder providerRequestId(@Nullable String id) { providerRequestId = id; return this; }
         public Builder route(@Nullable String upstream) { route = upstream; return this; }
         public Builder attempts(int count) { attempts = count; return this; }
+        public Builder attemptsDetail(List<Attempt> values) { attemptsDetail = List.copyOf(values); return this; }
         public Builder latency(Duration value) { latency = value; return this; }
         public Builder timeToFirstOutput(@Nullable Duration value) { timeToFirstOutput = value; return this; }
         public Builder fromCache(boolean value) { fromCache = value; return this; }

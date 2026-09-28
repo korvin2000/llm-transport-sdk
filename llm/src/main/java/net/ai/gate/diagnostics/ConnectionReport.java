@@ -9,9 +9,9 @@ import org.jspecify.annotations.Nullable;
 
 /// Immutable staged result of `llm.test(model)`. Steps run in order and stop at the first failure; later steps
 /// are `SKIPPED`. Successful authorization proves credentials, not quota or billing: `MODEL_ACCESS` and the opt-in
-/// `INFERENCE` probe answer those.
+/// `INFERENCE` probe answer those; the opt-in `USAGE`, `TOOLS` and `CACHE` probes follow it.
 public final class ConnectionReport {
-    public enum Kind { CONFIGURATION, NETWORK, AUTHENTICATION, MODEL_ACCESS, INFERENCE }
+    public enum Kind { CONFIGURATION, NETWORK, AUTHENTICATION, MODEL_ACCESS, INFERENCE, USAGE, TOOLS, CACHE }
     public enum Status { PASSED, FAILED, SKIPPED, NOT_SUPPORTED }
 
     private final List<Step> steps;

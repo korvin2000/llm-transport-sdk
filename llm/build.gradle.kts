@@ -2,11 +2,11 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     `java-library`
+    `maven-publish`
     alias(libs.plugins.kotlin.jvm)          // Kotlin consumers are verified by src/test/kotlin; the library itself is Java
 }
 
-group = "net.ai.gate"
-version = "0.1.0-SNAPSHOT"
+group = "net.ai.gate"                                   // version: gradle.properties; artifact id: rootProject.name (ai-gate)
 description = "AI Gate: one portable Java API over LLM providers and gateways"
 
 java {
@@ -28,6 +28,17 @@ dependencies {
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.archunit)
     testRuntimeOnly(libs.junit.launcher)
+}
+
+publishing {                                             // ./gradlew publishToMavenLocal for joint development
+    publications.create<MavenPublication>("ai-gate") {
+        from(components["java"])                          // the jar with sources and javadoc; 0.x: experimental APIs may change in minor versions
+        pom {
+            name = "AI Gate"
+            description = project.description
+            licenses { license { name = "GPL-3.0-only"; url = "https://www.gnu.org/licenses/gpl-3.0.txt" } }
+        }
+    }
 }
 
 tasks.withType<JavaCompile>().configureEach {

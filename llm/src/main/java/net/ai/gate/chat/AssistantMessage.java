@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 import net.ai.gate.chat.content.Content;
@@ -12,8 +13,10 @@ import net.ai.gate.chat.content.ToolCall;
 import net.ai.gate.error.ErrorCode;
 import net.ai.gate.error.InvalidResponseException;
 import net.ai.gate.error.LlmException;
+import net.ai.gate.internal.serialization.ConversationJson;
 import net.ai.gate.internal.validation.Checks;
 import net.ai.gate.json.Json;
+import net.ai.gate.json.JsonObject;
 import net.ai.gate.json.JsonValue;
 import net.ai.gate.metadata.ResponseInfo;
 import net.ai.gate.metadata.Usage;
@@ -22,9 +25,12 @@ import net.ai.gate.model.ModelRef;
 import org.jspecify.annotations.Nullable;
 
 /// Immutable, thread-safe model reply — and the history entry at once: `conversation.append(reply)` continues the
-/// conversation with any model. `model()` and `api()` record its origin, which drives the hand-off rules.
+/// conversation with any model. `model()` and `api()` record its origin, which drives the hand-off rules. A partial
+/// reply (stream failure or cancellation) names the parts that did not finish in [#incompleteParts()]: they render,
+/// but are never sent back to a model.
 public final class AssistantMessage implements Message {
     private final List<Content> content;
+    private final List<Integer> incompleteParts;
     private final StopReason stopReason;
     private final @Nullable String errorMessage, responseModel, responseId;
     private final Usage usage;
@@ -36,6 +42,9 @@ public final class AssistantMessage implements Message {
 
     private AssistantMessage(Builder b) {
         content = List.copyOf(b.content); stopReason = b.stopReason; errorMessage = b.errorMessage;
+        incompleteParts = List.copyOf(b.incompleteParts);
+        if (!incompleteParts.isEmpty() && incompleteParts.getLast() >= content.size())
+            throw new IllegalArgumentException("Incomplete part " + incompleteParts.getLast() + " is not among " + content.size() + " parts");
         responseModel = b.responseModel; responseId = b.responseId; usage = b.usage; model = b.model; api = b.api;
         warnings = List.copyOf(b.warnings); info = b.info; timestamp = b.timestamp != null ? b.timestamp : Instant.now();
     }
@@ -44,6 +53,13 @@ public final class AssistantMessage implements Message {
     public static Builder builder(ModelRef model, String api) { return new Builder(model, api); }
 
     public List<Content> content() { return content; }
+
+    /// Indices into [#content()] of parts cut off before they were complete — a tool call with partial arguments,
+    /// reasoning without its signature; empty for a complete reply.
+    public List<Integer> incompleteParts() { return incompleteParts; }
+
+    /// No part is incomplete.
+    public boolean complete() { return incompleteParts.isEmpty(); }
 
     /// Text parts only: no reasoning, refusal or tool arguments.
     public String text() {
@@ -110,12 +126,21 @@ public final class AssistantMessage implements Message {
     public Builder toBuilder() {
         var b = new Builder(model, api).content(content).stopReason(stopReason).errorMessage(errorMessage).usage(usage)
                 .responseModel(responseModel).responseId(responseId).warnings(warnings).info(info);
+        b.incompleteParts.addAll(incompleteParts);
         b.timestamp = timestamp;
         return b;
     }
 
+    /// An archive form (`ai-gate.reply/1`) — the message as in a conversation's JSON form, plus the provider's raw usage
+    /// and the call facts of [#info()], which the conversation form leaves out.
+    public JsonObject toJson() { return ConversationJson.writeReply(this); }
+
+    /// Reads [#toJson()]'s form; performs no I/O.
+    /// @throws IllegalArgumentException naming the JSON path that does not fit
+    public static AssistantMessage fromJson(JsonObject json) { return ConversationJson.readReply(json); }
+
     @Override public boolean equals(Object o) {
-        return o instanceof AssistantMessage m && content.equals(m.content) && stopReason.equals(m.stopReason)
+        return o instanceof AssistantMessage m && content.equals(m.content) && incompleteParts.equals(m.incompleteParts) && stopReason.equals(m.stopReason)
                 && Objects.equals(errorMessage, m.errorMessage) && usage.equals(m.usage) && model.equals(m.model)
                 && api.equals(m.api) && Objects.equals(responseModel, m.responseModel) && Objects.equals(responseId, m.responseId);
     }
@@ -131,6 +156,7 @@ public final class AssistantMessage implements Message {
         private final ModelRef model;
         private final String api;
         private final List<Content> content = new ArrayList<>();
+        private final TreeSet<Integer> incompleteParts = new TreeSet<>();
         private StopReason stopReason = StopReason.STOP;
         private @Nullable String errorMessage, responseModel, responseId;
         private Usage usage = Usage.empty();
@@ -142,7 +168,14 @@ public final class AssistantMessage implements Message {
 
         public Builder add(Content part) { content.add(part); return this; }
         public Builder text(String text) { return add(Content.text(text)); }
-        public Builder content(List<? extends Content> parts) { content.clear(); content.addAll(parts); return this; }
+        /// Replaces the parts and forgets which were incomplete.
+        public Builder content(List<? extends Content> parts) { content.clear(); content.addAll(parts); incompleteParts.clear(); return this; }
+        /// Marks the part at `index` of the content as cut off.
+        public Builder incompletePart(int index) {
+            if (index < 0) throw new IllegalArgumentException("Part index must not be negative: " + index);
+            incompleteParts.add(index);
+            return this;
+        }
         public Builder stopReason(StopReason reason) { stopReason = reason; return this; }
         public Builder errorMessage(@Nullable String message) { errorMessage = message; return this; }
         public Builder usage(Usage value) { usage = value; return this; }

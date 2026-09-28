@@ -19,6 +19,7 @@ import net.ai.gate.error.ErrorCode;
 import net.ai.gate.error.InvalidResponseException;
 import net.ai.gate.error.LlmException;
 import net.ai.gate.error.TransportException;
+import net.ai.gate.event.RequestEvent;
 import net.ai.gate.internal.cache.Exchange;
 import net.ai.gate.internal.http.FrameReader;
 import net.ai.gate.json.JsonNull;
@@ -32,7 +33,8 @@ import org.jspecify.annotations.Nullable;
 /// back-pressure; nothing is buffered beyond the current frame's events. One lock owns the stream state: the
 /// consumer steps under it, and `close()` from another thread first cancels the call (which aborts a blocked read)
 /// and then ends the stream under the same lock — never two threads draining. Completion needs the protocol's
-/// terminal evidence: a premature end of stream is a failure, thrown once with the partial reply.
+/// terminal evidence: a premature end of stream is a failure, thrown once with the partial reply — priced by the
+/// usage observed so far. Listeners get a content-free `Progress` event at most every `Progress.INTERVAL`.
 final class DefaultChatStream implements ChatStream {
     private static final System.Logger LOG = System.getLogger("net.ai.gate");
     /// Recording for the response cache stops beyond this many characters of frame data; the stream continues.
@@ -52,7 +54,7 @@ final class DefaultChatStream implements ChatStream {
     private final ReentrantLock lock = new ReentrantLock();
     private final ArrayDeque<ChatEvent> pending = new ArrayDeque<>();
     private @Nullable List<Frame> recorded;
-    private long recordedChars;
+    private long recordedChars, lastProgress = System.nanoTime();
     private boolean viewTaken, iteratorTaken, failureThrown;
     private volatile boolean ended;
     private volatile @Nullable AssistantMessage result;
@@ -193,6 +195,7 @@ final class DefaultChatStream implements ChatStream {
                 var frame = frames.next();
                 record(frame);
                 deliver(decoder.onFrame(frame));
+                progress();
             } else {
                 deliver(decoder.onEnd());
                 if (!ended) throw new TransportException(LlmException.Details.builder(ErrorCode.STREAM_INTERRUPTED,
@@ -232,6 +235,13 @@ final class DefaultChatStream implements ChatStream {
         }
     }
 
+    private void progress() {
+        long now = System.nanoTime();
+        if (ended || now - lastProgress < RequestEvent.Progress.INTERVAL.toNanos()) return;
+        lastProgress = now;
+        call.progress(accumulator.outputTokens(), accumulator.outputChars());
+    }
+
     private void complete(AssistantMessage message) {
         result = message;
         end();
@@ -243,7 +253,8 @@ final class DefaultChatStream implements ChatStream {
     private void fail(RuntimeException error) {
         call.watchdogFired(watchdog.fired());
         end();
-        var thrown = call.fail(error, accumulator.snapshot());
+        var partial = accumulator.snapshot();
+        var thrown = call.fail(error, partial.toBuilder().usage(Engine.priced(prepared, partial.usage(), !fromCache)).build());
         failure = thrown;
         failureThrown = true;
         pending.clear();

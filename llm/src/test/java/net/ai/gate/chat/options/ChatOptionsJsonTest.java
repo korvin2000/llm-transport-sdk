@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 
 import net.ai.gate.cache.CacheMode;
 import net.ai.gate.cache.CacheRetention;
@@ -14,6 +15,7 @@ import net.ai.gate.config.TimeoutPolicy;
 import net.ai.gate.json.Json;
 import net.ai.gate.json.JsonObject;
 import net.ai.gate.json.JsonSchema;
+import net.ai.gate.json.JsonString;
 import net.ai.gate.model.ReasoningLevel;
 import net.ai.gate.spi.protocol.ProviderOptions;
 import org.junit.jupiter.api.Test;
@@ -91,5 +93,19 @@ class ChatOptionsJsonTest {
         var extension = (JsonObject) Json.parse("{\"schema\":\"" + SCHEMA + "\",\"x-color\":\"blue\"}");
         var options = ChatOptions.fromJson(extension);
         assertEquals(Json.object("schema", SCHEMA), options.toJson(), "the x- field is accepted but has no slot to round-trip through");
+    }
+
+    @Test
+    void strictCodesAndHistoryPolicyUseVersionTwoOnlyWhenSet() {
+        var options = ChatOptions.builder().strictCodes(Set.of("option_adapted", "cache_hint_ignored")).historyPolicy(HistoryPolicy.REJECT_LOSSY).build();
+        var json = options.toJson();
+        assertEquals("ai-gate.options/2", json.string("schema"));
+        assertEquals(List.of("cache_hint_ignored", "option_adapted"), json.array("strictCodes").stream().map(v -> ((JsonString) v).value()).toList());
+        var read = ChatOptions.fromJson(json);
+        assertEquals(options.strictCodes(), read.strictCodes());
+        assertEquals(HistoryPolicy.REJECT_LOSSY, read.historyPolicy().orElseThrow());
+        assertEquals(SCHEMA, ChatOptions.builder().maxTokens(5).build().toJson().string("schema"), "older readers keep reading plain options");
+        assertEquals(Set.of(), ChatOptions.builder().strictCodes(Set.of("x")).build().overriddenBy(ChatOptions.builder().strictCodes(Set.of()).build()).strictCodes(),
+                "a narrower scope replaces the set");
     }
 }

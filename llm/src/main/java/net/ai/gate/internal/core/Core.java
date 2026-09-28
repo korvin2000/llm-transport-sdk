@@ -42,6 +42,7 @@ import net.ai.gate.spi.http.HttpReply;
 import net.ai.gate.spi.http.HttpTransport;
 import net.ai.gate.spi.http.TransportOptions;
 import net.ai.gate.spi.http.WireInterceptor;
+import net.ai.gate.spi.protocol.Tokenizer;
 import net.ai.gate.spi.provider.ProviderBundle;
 import org.jspecify.annotations.Nullable;
 
@@ -70,6 +71,7 @@ final class Core implements AutoCloseable {
     private final @Nullable ExecutorService ownedExecutor;
     private final CredentialStore credentials;
     private final Engine engine;
+    private final List<Tokenizer> tokenizers;
     private final Set<CancelToken> active = ConcurrentHashMap.newKeySet();
     private final Map<CredentialStore, String> storeIdentities = Collections.synchronizedMap(new WeakHashMap<>());
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -93,6 +95,7 @@ final class Core implements AutoCloseable {
         credentials = config.credentials();
         ownedExecutor = config.executor() == null ? Executors.newVirtualThreadPerTaskExecutor() : null;
         executor = config.executor() != null ? config.executor() : ownedExecutor;
+        tokenizers = config.tokenizers();
         engine = new Engine(this);
         var feeds = new ArrayList<CatalogFeed>(config.catalog().feeds());
         if (config.catalog().discoveredFeeds()) bundles.forEach(b -> feeds.addAll(b.catalogFeeds()));
@@ -133,6 +136,7 @@ final class Core implements AutoCloseable {
     JsonMapper mapper() { return mapper; }
     Clock clock() { return clock; }
     Executor executor() { return executor; }
+    List<Tokenizer> tokenizers() { return tokenizers; }
     Engine engine() { return engine; }
     CredentialStore credentials() { return credentials; }
 

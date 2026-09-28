@@ -14,10 +14,11 @@ import net.ai.gate.config.HttpOptions;
 import net.ai.gate.event.LlmListener;
 import net.ai.gate.json.JsonMapper;
 import net.ai.gate.spi.http.WireInterceptor;
+import net.ai.gate.spi.protocol.Tokenizer;
 import org.jspecify.annotations.Nullable;
 
 /// The validated product of `Llm.Builder`: everything a runtime is built from.
 public record LlmConfig(List<Provider> providers, boolean discoverProviders, CredentialStore credentials, Environment environment,
                         ChatOptions defaults, CatalogOptions catalog, HttpOptions http, @Nullable ResponseCache responseCache,
                         List<WireInterceptor> interceptors, List<LlmListener> listeners, @Nullable Executor executor,
-                        @Nullable JsonMapper jsonMapper, Clock clock) { }
+                        @Nullable JsonMapper jsonMapper, List<Tokenizer> tokenizers, Clock clock) { }

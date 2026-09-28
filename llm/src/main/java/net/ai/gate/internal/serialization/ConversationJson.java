@@ -2,15 +2,20 @@ package net.ai.gate.internal.serialization;
 
 import java.net.URI;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Currency;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 
+import net.ai.gate.cache.CacheRetention;
 import net.ai.gate.chat.AssistantMessage;
+import net.ai.gate.chat.CacheBreakpoint;
 import net.ai.gate.chat.Conversation;
 import net.ai.gate.chat.Message;
 import net.ai.gate.chat.StopReason;
@@ -31,17 +36,25 @@ import net.ai.gate.json.JsonObject;
 import net.ai.gate.json.JsonSchema;
 import net.ai.gate.json.JsonString;
 import net.ai.gate.json.JsonValue;
+import net.ai.gate.error.ErrorCode;
+import net.ai.gate.metadata.Attempt;
 import net.ai.gate.metadata.Cost;
+import net.ai.gate.metadata.ResponseInfo;
 import net.ai.gate.metadata.Usage;
 import net.ai.gate.metadata.Warning;
 import net.ai.gate.model.ModelRef;
 import org.jspecify.annotations.Nullable;
 
-/// The canonical JSON form of [Conversation] (`ai-gate.conversation/1`): deterministic member order, absent fields
-/// omitted, no file or network I/O on read. `Message.timestamp()` round-trips through the ISO-8601 `at` member;
-/// [net.ai.gate.metadata.ResponseInfo] and `Usage.raw()` are transient and never appear in this form.
+/// The canonical JSON form of [Conversation]: deterministic member order, absent fields omitted, no file or network
+/// I/O on read. `Message.timestamp()` round-trips through the ISO-8601 `at` member; [ResponseInfo] and `Usage.raw()`
+/// are transient and never appear in this form. A form is written as `ai-gate.conversation/1` unless it uses a
+/// member of version 2 — per-breakpoint retention, incomplete parts, cache-write classes, non-final usage — so older
+/// readers keep reading what they can represent; both versions are read.
+///
+/// The archive form of one reply (`ai-gate.reply/1`, [AssistantMessage#toJson()]) is the message's member set plus
+/// `usage.raw` and `info` (without rate limits and raw body).
 public final class ConversationJson {
-    public static final String SCHEMA = "ai-gate.conversation/1";
+    public static final String SCHEMA = "ai-gate.conversation/2", SCHEMA_V1 = "ai-gate.conversation/1", REPLY = "ai-gate.reply/1";
 
     private ConversationJson() { }
 
@@ -49,13 +62,60 @@ public final class ConversationJson {
 
     public static JsonObject write(Conversation c) {
         var json = new LinkedHashMap<String, JsonValue>();
-        json.put("schema", Json.valueOf(SCHEMA));
+        json.put("schema", Json.valueOf(needsV2(c) ? SCHEMA : SCHEMA_V1));
         c.system().ifPresent(s -> json.put("system", Json.valueOf(s)));
         json.put("tools", JsonArray.of(c.tools().stream().map(ConversationJson::writeTool).toList()));
         json.put("messages", JsonArray.of(c.messages().stream().map(ConversationJson::writeMessage).toList()));
-        if (!c.cacheBreakpoints().isEmpty()) json.put("cacheBreakpoints", Json.valueOf(c.cacheBreakpoints()));
+        if (!c.cacheBreakpoints().isEmpty()) json.put("cacheBreakpoints", JsonArray.of(c.cacheBreakpointsWithRetention().stream()
+                .map(b -> b.retention() == null ? (JsonValue) JsonNumber.of(b.index()) : Json.object("index", b.index(), "retention", lower(b.retention())))
+                .toList()));
         return JsonObject.of(json);
     }
+
+    private static boolean needsV2(Conversation c) {
+        return c.cacheBreakpointsWithRetention().stream().anyMatch(b -> b.retention() != null) || c.messages().stream().anyMatch(m ->
+                m instanceof AssistantMessage a && (!a.complete() || !a.usage().cacheWrites().isEmpty() || !a.usage().finalForCall()));
+    }
+
+    /// The archive form of one reply.
+    public static JsonObject writeReply(AssistantMessage a) {
+        var json = new LinkedHashMap<String, JsonValue>();
+        json.put("schema", Json.valueOf(REPLY));
+        json.putAll(((JsonObject) writeMessage(a)).members());
+        var usage = ((JsonObject) json.get("usage"));
+        if (!(a.usage().raw() instanceof JsonNull)) json.put("usage", usage.with("raw", a.usage().raw()));
+        var info = a.info();
+        if (!info.requestId().isEmpty()) json.put("info", writeInfo(info));
+        return JsonObject.of(json);
+    }
+
+    private static JsonValue writeInfo(ResponseInfo i) {
+        var json = new LinkedHashMap<String, JsonValue>();
+        json.put("requestId", Json.valueOf(i.requestId()));
+        json.put("providerId", Json.valueOf(i.providerId()));
+        i.providerRequestId().ifPresent(v -> json.put("providerRequestId", Json.valueOf(v)));
+        i.route().ifPresent(v -> json.put("route", Json.valueOf(v)));
+        json.put("attempts", JsonNumber.of(i.attempts()));
+        json.put("attemptsDetail", JsonArray.of(i.attemptsDetail().stream().map(ConversationJson::writeAttempt).toList()));
+        json.put("latency", Json.valueOf(i.latency().toString()));
+        i.timeToFirstOutput().ifPresent(v -> json.put("timeToFirstOutput", Json.valueOf(v.toString())));
+        json.put("fromCache", Json.valueOf(i.fromCache()));
+        return JsonObject.of(json);
+    }
+
+    private static JsonValue writeAttempt(Attempt a) {
+        var json = new LinkedHashMap<String, JsonValue>();
+        json.put("index", JsonNumber.of(a.index()));
+        json.put("startedAt", Json.valueOf(a.startedAt()));
+        json.put("duration", Json.valueOf(a.duration().toString()));
+        if (a.httpStatus() != null) json.put("httpStatus", JsonNumber.of(a.httpStatus()));
+        if (a.error() != null) json.put("error", Json.valueOf(a.error().value()));
+        json.put("sent", Json.valueOf(a.sent()));
+        json.put("outcomeUnknown", Json.valueOf(a.outcomeUnknown()));
+        return JsonObject.of(json);
+    }
+
+    private static String lower(Enum<?> value) { return value.name().toLowerCase(Locale.ROOT); }
 
     private static JsonValue writeTool(Tool tool) {
         var json = new LinkedHashMap<String, JsonValue>();
@@ -88,6 +148,7 @@ public final class ConversationJson {
             json.put("model", Json.object("provider", a.model().providerId(), "id", a.model().modelId()));
             json.put("api", Json.valueOf(a.api()));
             json.put("content", writeParts(a.content()));
+            if (!a.complete()) json.put("incompleteParts", Json.valueOf(a.incompleteParts()));
             json.put("stopReason", Json.valueOf(a.stopReason().raw()));
             a.errorMessage().ifPresent(e -> json.put("errorMessage", Json.valueOf(e)));
             a.responseModel().ifPresent(v -> json.put("responseModel", Json.valueOf(v)));
@@ -110,10 +171,16 @@ public final class ConversationJson {
         u.input().ifPresent(v -> json.put("input", JsonNumber.of(v)));
         u.cacheRead().ifPresent(v -> json.put("cacheRead", JsonNumber.of(v)));
         u.cacheWrite().ifPresent(v -> json.put("cacheWrite", JsonNumber.of(v)));
+        if (!u.cacheWrites().isEmpty()) {
+            var classes = new LinkedHashMap<String, JsonValue>();
+            u.cacheWrites().forEach((retention, tokens) -> classes.put(lower(retention), JsonNumber.of(tokens)));
+            json.put("cacheWrites", JsonObject.of(classes));
+        }
         u.output().ifPresent(v -> json.put("output", JsonNumber.of(v)));
         u.reasoning().ifPresent(v -> json.put("reasoning", JsonNumber.of(v)));
         u.reportedTotal().ifPresent(v -> json.put("total", JsonNumber.of(v)));
         json.put("spent", Json.valueOf(u.spent()));
+        if (!u.finalForCall()) json.put("final", Json.valueOf(false));
         u.cost().ifPresent(c -> json.put("cost", writeCost(c)));
         return JsonObject.of(json);
     }
@@ -208,8 +275,8 @@ public final class ConversationJson {
 
     /// @throws IllegalArgumentException naming the JSON path that does not fit
     public static Conversation read(JsonObject json) {
-        if (!(json.get("schema").orElse(null) instanceof JsonString s) || !SCHEMA.equals(s.value()))
-            throw fail("schema", "must be '" + SCHEMA + "'");
+        if (!(json.get("schema").orElse(null) instanceof JsonString s) || !Set.of(SCHEMA, SCHEMA_V1).contains(s.value()))
+            throw fail("schema", "must be '" + SCHEMA + "' or '" + SCHEMA_V1 + "'");
         var builder = Conversation.builder();
         var system = optString(json, "system", "system");
         if (system != null) builder.system(system);
@@ -218,7 +285,46 @@ public final class ConversationJson {
         builder.messages(messages);
         var breakpoints = readBreakpoints(json);
         var conversation = builder.build();
-        return breakpoints.isEmpty() ? conversation : conversation.withMessages(messages, breakpoints);
+        return breakpoints.isEmpty() ? conversation : conversation.withMessages(messages, List.of()).withCacheBreakpoints(breakpoints);
+    }
+
+    /// Reads [#writeReply]'s form.
+    public static AssistantMessage readReply(JsonObject json) {
+        if (!(json.get("schema").orElse(null) instanceof JsonString s) || !REPLY.equals(s.value())) throw fail("schema", "must be '" + REPLY + "'");
+        var at = parseInstant(str(member(json, "at", "at"), "at"), "at");
+        var reply = readAssistant(json, "reply", at);
+        var b = reply.toBuilder();
+        if (member(json, "usage", "usage") instanceof JsonObject usage && usage.get("raw").orElse(null) instanceof JsonValue raw)
+            b.usage(reply.usage().toBuilder().raw(raw).build());
+        if (json.get("info").orElse(null) instanceof JsonObject info) b.info(readInfo(info, "info"));
+        return b.build();
+    }
+
+    private static ResponseInfo readInfo(JsonObject json, String path) {
+        var b = ResponseInfo.builder(str(member(json, "requestId", path + ".requestId"), path + ".requestId"),
+                str(member(json, "providerId", path + ".providerId"), path + ".providerId"));
+        b.providerRequestId(optString(json, "providerRequestId", path)).route(optString(json, "route", path));
+        optLong(json, "attempts", path).ifPresent(n -> b.attempts(n.intValue()));
+        if (json.get("attemptsDetail").orElse(null) instanceof JsonArray attempts) {
+            var list = new ArrayList<Attempt>();
+            for (int i = 0; i < attempts.values().size(); i++) list.add(readAttempt(obj(attempts.values().get(i), path + ".attemptsDetail[" + i + "]"), path + ".attemptsDetail[" + i + "]"));
+            b.attemptsDetail(list);
+        }
+        var latency = optString(json, "latency", path);
+        if (latency != null) b.latency(parseDuration(latency, path + ".latency"));
+        var first = optString(json, "timeToFirstOutput", path);
+        if (first != null) b.timeToFirstOutput(parseDuration(first, path + ".timeToFirstOutput"));
+        if (json.get("fromCache").orElse(null) instanceof JsonValue fromCache) b.fromCache(bool(fromCache, path + ".fromCache"));
+        return b.build();
+    }
+
+    private static Attempt readAttempt(JsonObject json, String path) {
+        var error = optString(json, "error", path);
+        return new Attempt(optLong(json, "index", path).orElseThrow(() -> fail(path + ".index", "required")).intValue(),
+                parseInstant(str(member(json, "startedAt", path + ".startedAt"), path + ".startedAt"), path + ".startedAt"),
+                parseDuration(str(member(json, "duration", path + ".duration"), path + ".duration"), path + ".duration"),
+                optLong(json, "httpStatus", path).map(Long::intValue).orElse(null), error == null ? null : ErrorCode.of(error),
+                bool(member(json, "sent", path + ".sent"), path + ".sent"), bool(member(json, "outcomeUnknown", path + ".outcomeUnknown"), path + ".outcomeUnknown"));
     }
 
     private static List<Tool> readTools(JsonObject json) {
@@ -287,6 +393,9 @@ public final class ConversationJson {
         var builder = AssistantMessage.builder(model, api).content(readParts(m, path))
                 .stopReason(StopReason.of(str(member(m, "stopReason", path + ".stopReason"), path + ".stopReason")))
                 .timestamp(at);
+        if (m.get("incompleteParts").orElse(null) instanceof JsonArray incomplete)
+            for (int i = 0; i < incomplete.values().size(); i++)
+                builder.incompletePart((int) num(incomplete.values().get(i), path + ".incompleteParts[" + i + "]").longValue());
         var errorMessage = optString(m, "errorMessage", path);
         if (errorMessage != null) builder.errorMessage(errorMessage);
         var responseModel = optString(m, "responseModel", path);
@@ -311,6 +420,9 @@ public final class ConversationJson {
         optLong(json, "input", path).ifPresent(b::input);
         optLong(json, "cacheRead", path).ifPresent(b::cacheRead);
         optLong(json, "cacheWrite", path).ifPresent(b::cacheWrite);
+        if (json.get("cacheWrites").orElse(null) instanceof JsonObject classes)
+            classes.members().forEach((name, tokens) -> b.cacheWrite(retention(name, path + ".cacheWrites." + name), num(tokens, path + ".cacheWrites." + name).longValue()));
+        if (json.get("final").orElse(null) instanceof JsonValue value) b.finalForCall(bool(value, path + ".final"));
         optLong(json, "output", path).ifPresent(b::output);
         optLong(json, "reasoning", path).ifPresent(b::reasoning);
         optLong(json, "total", path).ifPresent(b::total);
@@ -423,13 +535,28 @@ public final class ConversationJson {
         return Content.Document.of(readSource(so, kind, path), mediaType, optString(json, "title", path));
     }
 
-    private static List<Integer> readBreakpoints(JsonObject json) {
+    /// Plain indices, or `{index, retention}` objects for breakpoints with their own retention.
+    private static List<CacheBreakpoint> readBreakpoints(JsonObject json) {
         var value = json.get("cacheBreakpoints").orElse(null);
         if (value == null) return List.of();
         if (!(value instanceof JsonArray array)) throw fail("cacheBreakpoints", "expected an array");
-        var list = new ArrayList<Integer>();
-        for (int i = 0; i < array.values().size(); i++) list.add((int) num(array.values().get(i), "cacheBreakpoints[" + i + "]").longValue());
+        var list = new ArrayList<CacheBreakpoint>();
+        for (int i = 0; i < array.values().size(); i++) {
+            var path = "cacheBreakpoints[" + i + "]";
+            list.add(array.values().get(i) instanceof JsonObject b
+                    ? new CacheBreakpoint((int) num(member(b, "index", path + ".index"), path + ".index").longValue(),
+                            retention(str(member(b, "retention", path + ".retention"), path + ".retention"), path + ".retention"))
+                    : new CacheBreakpoint((int) num(array.values().get(i), path).longValue(), null));
+        }
         return list;
+    }
+
+    private static CacheRetention retention(String name, String path) {
+        try { return CacheRetention.valueOf(name.toUpperCase(Locale.ROOT)); } catch (IllegalArgumentException e) { throw fail(path, "unknown retention '" + name + "'"); }
+    }
+
+    private static Duration parseDuration(String text, String path) {
+        try { return Duration.parse(text); } catch (RuntimeException e) { throw fail(path, "not an ISO-8601 duration: " + text); }
     }
 
     // ---- JSON helpers

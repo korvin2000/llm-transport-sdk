@@ -17,11 +17,13 @@ import net.ai.gate.catalog.CatalogOptions;
 import net.ai.gate.catalog.ModelCatalog;
 import net.ai.gate.chat.AssistantMessage;
 import net.ai.gate.chat.Conversation;
+import net.ai.gate.chat.HistoryIssue;
 import net.ai.gate.chat.options.ChatOptions;
 import net.ai.gate.chat.stream.ChatStream;
 import net.ai.gate.config.HttpOptions;
 import net.ai.gate.diagnostics.ConnectionReport;
 import net.ai.gate.diagnostics.ConnectionTest;
+import net.ai.gate.diagnostics.PreparedCall;
 import net.ai.gate.diagnostics.PreparedRequest;
 import net.ai.gate.error.InvalidResponseException;
 import net.ai.gate.event.LlmListener;
@@ -30,8 +32,11 @@ import net.ai.gate.internal.core.LlmConfig;
 import net.ai.gate.json.JsonMapper;
 import net.ai.gate.json.JsonObject;
 import net.ai.gate.lifecycle.Registration;
+import net.ai.gate.metadata.TokenCount;
 import net.ai.gate.model.Model;
 import net.ai.gate.spi.http.WireInterceptor;
+import net.ai.gate.spi.protocol.ApiFeatures;
+import net.ai.gate.spi.protocol.Tokenizer;
 import net.ai.gate.spi.provider.ProviderApi;
 import org.jetbrains.annotations.ApiStatus;
 import org.jspecify.annotations.Nullable;
@@ -96,8 +101,44 @@ public interface Llm extends AutoCloseable {
 
     default ChatStream stream(Model model, Conversation conversation) { return stream(model, conversation, ChatOptions.none()); }
 
+    /// Streams on the runtime executor and returns at once. Request-construction failures are thrown here, as by
+    /// `stream()`; everything after — credentials, sending, the reply — is reported by [LlmCall#outcome()].
+    @ApiStatus.Experimental
+    LlmCall start(Model model, Conversation conversation, ChatOptions options);
+
+    /// Executes exactly what was prepared, streamed or not as prepared.
+    /// @throws IllegalArgumentException when another runtime prepared the call
+    @ApiStatus.Experimental
+    LlmCall start(PreparedCall prepared);
+
+    /// As [#start(PreparedCall)], blocking.
+    @ApiStatus.Experimental
+    AssistantMessage complete(PreparedCall prepared);
+
+    /// Resolves options, adapts the history and encodes the request once, as `stream()` (`streaming`) or `complete()`
+    /// would. No network, no credentials.
+    /// @throws net.ai.gate.error.InvalidRequestException when the request cannot be built, strict adaptations included
+    @ApiStatus.Experimental
+    PreparedCall prepare(Model model, Conversation conversation, ChatOptions options, boolean streaming);
+
     /// Exactly what `complete()` would send, or why it would not. No network, no credentials.
     PreparedRequest preview(Model model, Conversation conversation, ChatOptions options);
+
+    /// What the API a call to `model` would use does with requests — output cap, prompt caching, usage reporting.
+    /// No I/O.
+    @ApiStatus.Experimental
+    ApiFeatures features(Model model);
+
+    /// The input tokens of a prepared call: exact through the API's counting endpoint where it has one (a network
+    /// call, not billed as inference), else from a registered [Tokenizer], else estimated — each with its method and
+    /// margin.
+    @ApiStatus.Experimental
+    TokenCount countTokens(PreparedCall prepared);
+
+    /// What the hand-off of `conversation` to `model` would drop or convert, located per message and part: a dry run
+    /// that lists every conversion, whatever the options' `historyPolicy`. No I/O.
+    @ApiStatus.Experimental
+    List<HistoryIssue> check(Model model, Conversation conversation, ChatOptions options);
 
     /// Staged, non-billable check: configuration → network → authentication → model access.
     default ConnectionReport test(Model model) { return test(model, _ -> { }); }
@@ -135,6 +176,7 @@ public interface Llm extends AutoCloseable {
         private final List<LlmListener> listeners = new ArrayList<>();
         private @Nullable Executor executor;
         private @Nullable JsonMapper jsonMapper;
+        private final List<Tokenizer> tokenizers = new ArrayList<>();
         private Clock clock = Clock.systemUTC();
 
         private Builder() { }
@@ -177,6 +219,8 @@ public interface Llm extends AutoCloseable {
         public Builder executor(Executor value) { executor = value; return this; }
         /// Default: record binding.
         public Builder jsonMapper(JsonMapper mapper) { jsonMapper = mapper; return this; }
+        /// Adds a local tokenizer for `countTokens`; the first that supports a model counts for it.
+        public Builder tokenizer(Tokenizer tokenizer) { tokenizers.add(tokenizer); return this; }
         /// For tests: credential expiry, backoff and catalog age.
         public Builder clock(Clock value) { clock = value; return this; }
 
@@ -185,7 +229,7 @@ public interface Llm extends AutoCloseable {
                 throw new IllegalArgumentException("HttpOptions for the JDK transport cannot be combined with an injected transport");
             return DefaultLlm.create(new LlmConfig(List.copyOf(providers.values()), discover, credentials, environment,
                     defaults, catalog, http, responseCache, List.copyOf(interceptors), List.copyOf(listeners), executor,
-                    jsonMapper, clock));
+                    jsonMapper, List.copyOf(tokenizers), clock));
         }
     }
 }

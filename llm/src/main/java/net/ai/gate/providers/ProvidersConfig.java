@@ -8,6 +8,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import net.ai.gate.Provider;
 import net.ai.gate.chat.options.ChatOptions;
@@ -52,32 +53,58 @@ public final class ProvidersConfig {
 
     private ProvidersConfig() { }
 
+    /// One reason a configuration does not read, for forms: the JSON path (`providers[1]`) and what is wrong there.
+    public record Problem(String path, String message) {
+        @Override public String toString() { return path.isEmpty() ? message : path + ": " + message; }
+    }
+
     /// @throws IllegalArgumentException listing every invalid entry and field
     public static List<Provider> read(String json, List<Provider> presets) {
-        if (!(Json.parse(json) instanceof JsonObject document) || !SCHEMA.equals(text(document, "schema")))
-            throw new IllegalArgumentException("Not a " + SCHEMA + " document");
-        var problems = new ArrayList<String>();
+        var problems = new ArrayList<Problem>();
+        var providers = parse(json, presets, problems);
+        if (problems.size() == 1 && problems.getFirst().path().equals("schema")) throw new IllegalArgumentException(problems.getFirst().message());
+        if (!problems.isEmpty())
+            throw new IllegalArgumentException("Invalid provider configuration: " + problems.stream().map(Problem::toString).collect(Collectors.joining("; ")));
+        return providers;
+    }
+
+    /// Every problem [#read] would report, without throwing; empty when the configuration reads. Malformed JSON is
+    /// reported too.
+    public static List<Problem> validate(String json, List<Provider> presets) {
+        var problems = new ArrayList<Problem>();
+        try {
+            parse(json, presets, problems);
+        } catch (IllegalArgumentException e) {
+            problems.add(new Problem("", String.valueOf(e.getMessage())));
+        }
+        return List.copyOf(problems);
+    }
+
+    private static List<Provider> parse(String json, List<Provider> presets, List<Problem> problems) {
+        if (!(Json.parse(json) instanceof JsonObject document) || !SCHEMA.equals(text(document, "schema"))) {
+            problems.add(new Problem("schema", "Not a " + SCHEMA + " document"));
+            return List.of();
+        }
         var providers = new ArrayList<Provider>();
         var providersValue = document.get("providers").orElse(null);
         var entries = List.<JsonValue>of();
         if (providersValue instanceof JsonArray a) entries = a.values();
-        else if (providersValue != null) problems.add("'providers' must be an array");
+        else if (providersValue != null) problems.add(new Problem("providers", "'providers' must be an array"));
         for (int i = 0; i < entries.size(); i++) {
             if (!(entries.get(i) instanceof JsonObject entry)) {
-                problems.add("providers[" + i + "]: expected an object");
+                problems.add(new Problem("providers[" + i + "]", "expected an object"));
                 continue;
             }
             try {
                 providers.add(read(entry, presets));
             } catch (RuntimeException e) {
-                problems.add("providers[" + i + "]: " + e.getMessage());
+                problems.add(new Problem("providers[" + i + "]", String.valueOf(e.getMessage())));
             }
         }
         var seen = new HashSet<String>();
         var duplicates = new LinkedHashSet<String>();
         for (var p : providers) if (!seen.add(p.id())) duplicates.add(p.id());
-        if (!duplicates.isEmpty()) problems.add("duplicate provider id(s): " + duplicates);
-        if (!problems.isEmpty()) throw new IllegalArgumentException("Invalid provider configuration: " + String.join("; ", problems));
+        if (!duplicates.isEmpty()) problems.add(new Problem("providers", "duplicate provider id(s): " + duplicates));
         return List.copyOf(providers);
     }
 
