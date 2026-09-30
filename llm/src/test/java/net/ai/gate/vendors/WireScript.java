@@ -35,6 +35,19 @@ public final class WireScript implements HttpTransport {
         return reply(200, "text/event-stream", Arrays.stream(data).map(d -> "data: " + d + "\n\n").collect(Collectors.joining()));
     }
 
+    /// Events as the ChatGPT Codex backend sends them: `event:` and `data:` fields, and no content type at all.
+    public WireScript untypedEvents(String... data) {
+        var body = Arrays.stream(data).map(d -> "event: " + d.replaceFirst("(?s).*?\"type\":\"([^\"]+)\".*", "$1") + "\ndata: " + d + "\n\n").collect(Collectors.joining());
+        replies.add(HttpReply.of(200, Map.of(), body.getBytes(StandardCharsets.UTF_8)));
+        return this;
+    }
+
+    /// A JSON body without a content type.
+    public WireScript untypedJson(String body) {
+        replies.add(HttpReply.of(200, Map.of(), body.getBytes(StandardCharsets.UTF_8)));
+        return this;
+    }
+
     private WireScript reply(int status, String type, String body) {
         replies.add(HttpReply.of(status, Map.of("content-type", List.of(type)), body.getBytes(StandardCharsets.UTF_8)));
         return this;

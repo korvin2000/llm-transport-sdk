@@ -41,6 +41,18 @@ class CodexWireTest {
                 .environment(Environment.none()).catalog(c -> c.offline()).build();
     }
 
+    /// Phase 0 (2026-09-30): the live backend answers `complete()` with events and no content type; decoding them as a
+    /// JSON body failed every non-streaming call with `malformed_response` while `stream()` worked.
+    @Test
+    void completeReadsEventsTheBackendSendsWithoutAContentType() {
+        var wire = new WireScript().untypedEvents(EVENTS.toArray(String[]::new));
+        try (var llm = runtime(wire)) {
+            var reply = llm.complete(llm.model("openai-codex", "gpt-5.5"), Conversation.of("Hello"));
+            assertEquals("Hi there", reply.text());
+            assertEquals(2, reply.usage().output().orElseThrow());
+        }
+    }
+
     @Test
     void completeStreamsTheCodexDialectAndCollectsTheEvents() {
         var wire = new WireScript().sse(EVENTS.toArray(String[]::new));

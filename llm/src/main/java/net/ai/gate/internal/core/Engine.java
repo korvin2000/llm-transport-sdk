@@ -1,6 +1,9 @@
 package net.ai.gate.internal.core;
 
+import java.io.IOException;
+import java.io.PushbackInputStream;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -237,10 +240,10 @@ final class Engine {
                 return cached.body() == null ? new DefaultChatStream(this, call, p, null, cached.frames().iterator(), null, true, null).result()
                         : finish(call, p, decode(p, cached.reply()), true);
             }
-            var sent = call.send(p.call(), true);
+            var sniffed = eventStream(call.send(p.call(), true));
+            var sent = sniffed.reply();
             // endpoints that only stream (the ChatGPT Codex backend) answer with events: read them as the stream would
-            if (sent.header("content-type").orElse("").toLowerCase(Locale.ROOT).startsWith("text/event-stream"))
-                return live(p, call, sent, cache).result();
+            if (sniffed.events()) return live(p, call, sent, cache).result();
             try (var reply = sent) {
                 var message = call.read(reply, () -> decode(p, reply));
                 call.firstOutput();
@@ -252,6 +255,37 @@ final class Engine {
             throw call.fail(e, null);
         }
     }
+
+    /// A reply and whether it carries server-sent events.
+    record Sniffed(HttpReply reply, boolean events) { }
+
+    /// Whether [reply] is an event stream: declared by its content type, or — when a successful reply declares none, as
+    /// the ChatGPT Codex backend does for every call — begun by an SSE field. The sniffed bytes stay in the body.
+    static Sniffed eventStream(HttpReply reply) {
+        var type = reply.header("content-type").orElse("").toLowerCase(Locale.ROOT);
+        if (type.startsWith("text/event-stream")) return new Sniffed(reply, true);
+        if (!type.isEmpty() || !reply.successful()) return new Sniffed(reply, false);
+        try {
+            var in = new PushbackInputStream(reply.body(), SNIFF_BYTES);
+            var head = new byte[SNIFF_BYTES];
+            int n = 0;
+            while (n < SSE_FIELD_BYTES) {
+                int read = in.read(head, n, head.length - n);
+                if (read < 0) break;
+                n += read;
+            }
+            if (n > 0) in.unread(head, 0, n);
+            var start = new String(head, 0, n, StandardCharsets.UTF_8).stripLeading();
+            boolean events = start.startsWith("event:") || start.startsWith("data:") || start.startsWith("id:") || start.startsWith(":");
+            return new Sniffed(HttpReply.of(reply.status(), reply.headers(), in), events);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /// Bytes read to tell an untyped event stream from a JSON body: enough for the longest field name, `event:`.
+    private static final int SSE_FIELD_BYTES = 6;
+    private static final int SNIFF_BYTES = 64;
 
     ChatStream stream(Prepared p, CredentialStore store) {
         var call = newCall(p, store, true);

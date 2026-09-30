@@ -4,6 +4,14 @@
 
 ## 0.1.0 (unreleased) — transport facts for agent hosts
 
+Fixed (2026-09-30):
+- `complete()` against the ChatGPT Codex backend (`openai-codex`) failed every call with `malformed_response`
+  ("Invalid JSON at offset 1"): the backend answers with server-sent events and **no `Content-Type` header**, and
+  `complete()` switched to the event reader only for `text/event-stream`. A successful reply that declares no content
+  type is now sniffed: a body that begins with an SSE field (`event:`, `data:`, `id:`, `:`) is read as the stream would
+  read it; the sniffed bytes stay in the body. `stream()`/`start()` were never affected. Regression:
+  `CodexWireTest.completeReadsEventsTheBackendSendsWithoutAContentType`.
+
 Added (source-compatible):
 - Accounting after failure: `ChatEvent.UsageUpdate`, `Usage.finalForCall()`; a partial reply (`LlmException.partial()`,
   `RequestEvent.Finished`) carries the last observed usage, priced where possible.
