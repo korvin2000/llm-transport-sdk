@@ -171,6 +171,58 @@ class OpenAiWireTest {
     }
 
     @Test
+    void completionsStreamSynthesizesIdsForToolCallsWhoseIdIsBlank() {
+        var wire = new WireScript().sse(
+                "{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"\"}}]}}]}",
+                "{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}}]}}]}",
+                "{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Rome\\\"}\"}}]}}]}",
+                "{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}",
+                "[DONE]")
+                .json("{\"id\":\"c2\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Done\"},\"finish_reason\":\"stop\"}]}");
+        try (var llm = wire.runtime(OpenAiCompatible.deepSeek(), "DEEPSEEK_API_KEY")) {
+            var model = llm.model("deepseek", "deepseek-v4-pro");
+            List<ChatEvent> events;
+            try (var stream = llm.stream(model, ASK)) { events = stream.events().toList(); }
+            var reply = ((ChatEvent.Done) events.getLast()).message();
+            assertEquals(List.of(ToolCall.of("call_0", "weather", "{\"city\":\"Oslo\"}"), ToolCall.of("call_1", "weather", "{\"city\":\"Rome\"}")), reply.content());
+            assertEquals(List.of("call_0", "call_1"), events.stream().filter(ChatEvent.ToolCallStart.class::isInstance)
+                    .map(e -> ((ChatEvent.ToolCallStart) e).callId()).toList(), "the caller sees the synthesized ids");
+
+            llm.complete(model, ASK.append(reply, reply.toolCalls().stream().map(c -> ToolResult.of(c, "cold")).toList()));
+            var messages = wire.body(1).objects("messages");
+            assertEquals(List.of("call_0", "call_1"), messages.get(2).objects("tool_calls").stream().map(c -> c.string("id")).toList());
+            assertEquals(List.of("call_0", "call_1"), List.of(messages.get(3).string("tool_call_id"), messages.get(4).string("tool_call_id")));
+        }
+    }
+
+    @Test
+    void completionsStreamKeepsTheRealIdWhenLaterDeltasCarryABlankOne() {
+        var wire = new WireScript().sse(
+                "{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"\"}}]}}]}",
+                "{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"arguments\":\"{\\\"city\\\":\"}}]}}]}",
+                "{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"arguments\":\"\\\"Oslo\\\"}\"}}]}}]}",
+                "{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}",
+                "[DONE]");
+        try (var llm = wire.runtime(OpenAiCompatible.deepSeek(), "DEEPSEEK_API_KEY"); var stream = llm.stream(llm.model("deepseek", "deepseek-v4-pro"), ASK)) {
+            assertEquals(List.of(ToolCall.of("call_a", "weather", "{\"city\":\"Oslo\"}")), stream.result().content());
+        }
+    }
+
+    @Test
+    void completionsDecodeSynthesizesIdsForToolCallsWhoseIdIsBlankOrMissing() {
+        var wire = new WireScript().json("{\"id\":\"c1\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":["
+                + "{\"id\":\"\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}},"
+                + "{\"id\":\"  \",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{}\"}},"
+                + "{\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{}\"}},"
+                + "{\"id\":\"call_x\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}");
+        try (var llm = wire.runtime(OpenAiCompatible.deepSeek(), "DEEPSEEK_API_KEY")) {
+            var reply = llm.complete(llm.model("deepseek", "deepseek-v4-pro"), ASK);
+            assertEquals(List.of("call_0", "call_1", "call_2", "call_x"), reply.toolCalls().stream().map(ToolCall::id).toList());
+            assertEquals("{\"city\":\"Oslo\"}", reply.toolCalls().getFirst().argumentsJson());
+        }
+    }
+
+    @Test
     void openRouterUsesItsReasoningObjectAndSessionHeader() {
         var wire = new WireScript().json("{\"choices\":[{\"message\":{\"content\":\"ok\",\"reasoning\":\"r\"},\"finish_reason\":\"stop\"}],"
                 + "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"prompt_tokens_details\":{\"cached_tokens\":0}}}");
@@ -269,6 +321,28 @@ class OpenAiWireTest {
             assertEquals("abcDEF123", calls.get(1).string("id"), "Mistral's own ids stay");
             assertEquals(rewritten, messages.get(3).string("tool_call_id"));
             assertEquals("abcDEF123", messages.get(4).string("tool_call_id"));
+        }
+    }
+
+    @Test
+    void responsesSynthesizeAnIdForAFunctionCallWhoseCallIdIsBlank() {
+        var item = "{\"type\":\"function_call\",\"call_id\":\"\",\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Rome\\\"}\"}";
+        var wire = new WireScript().json("{\"id\":\"resp_4\",\"status\":\"completed\",\"output\":[" + item + "," + item + "]}").sse(
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp_5\",\"model\":\"gpt-5.1\"}}",
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"\",\"name\":\"weather\"}}",
+                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" + item + "}",
+                "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"name\":\"weather\"}}",
+                "{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" + item + "}",
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_5\",\"status\":\"completed\",\"output\":[]}}");
+        try (var llm = wire.runtime(OpenAi.provider(), "OPENAI_API_KEY")) {
+            var model = llm.model("openai", "gpt-5.1");
+            assertEquals(List.of("call_0", "call_1"), llm.complete(model, ASK).toolCalls().stream().map(ToolCall::id).toList());
+            try (var stream = llm.stream(model, ASK)) {
+                var events = stream.events().toList();
+                assertEquals(List.of("call_0", "call_1"), events.stream().filter(ChatEvent.ToolCallStart.class::isInstance)
+                        .map(e -> ((ChatEvent.ToolCallStart) e).callId()).toList());
+                assertEquals(List.of("call_0", "call_1"), ((ChatEvent.Done) events.getLast()).message().toolCalls().stream().map(ToolCall::id).toList());
+            }
         }
     }
 }

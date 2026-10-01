@@ -250,7 +250,7 @@ public final class CompletionsCodec implements WireApi {
         int n = 0;
         for (var call : message.objects("tool_calls")) {
             var function = call.object("function");
-            b.add(ToolCall.of(call.optString("id").orElse("call_" + n), function.string("name"), function.optString("arguments").orElse("")));
+            b.add(ToolCall.of(Codecs.callId(call.optString("id").orElse(null), n), function.string("name"), function.optString("arguments").orElse("")));
             n++;
         }
         return b.stopReason(stop(choice.optString("finish_reason").orElse(null))).usage(usage(json.object("usage")))
@@ -334,9 +334,11 @@ public final class CompletionsCodec implements WireApi {
                     for (var call : delta.objects("tool_calls")) {
                         var key = "tool" + call.optLong("index").orElse(0);
                         var function = call.object("function");
-                        if (!parts.containsKey(key))
-                            events.add(new ChatEvent.ToolCallStart(index(key), call.optString("id").orElse("call_" + parts.size()),
+                        if (!parts.containsKey(key)) {
+                            int at = index(key);
+                            events.add(new ChatEvent.ToolCallStart(at, Codecs.callId(call.optString("id").orElse(null), at),
                                     function.optString("name").orElse("unknown")));
+                        }
                         function.optString("arguments").filter(s -> !s.isEmpty())
                                 .ifPresent(a -> events.add(new ChatEvent.ToolCallDelta(index(key), a, Json.object())));
                     }

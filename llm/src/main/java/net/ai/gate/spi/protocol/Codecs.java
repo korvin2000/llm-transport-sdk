@@ -19,6 +19,7 @@ import net.ai.gate.metadata.Warning;
 import net.ai.gate.model.Capability;
 import net.ai.gate.model.ReasoningLevel;
 import net.ai.gate.model.SupportLevel;
+import org.jspecify.annotations.Nullable;
 
 /// Mapping steps every codec needs: media bytes, output schemas, effort names, sampling rules, tool-call ids, JSON
 /// frames and failures reported inside a stream. Pure functions.
@@ -77,6 +78,12 @@ public final class Codecs {
         var cleaned = foreignId.replaceAll("[^a-zA-Z0-9_-]", "_");
         var hash = "_" + Integer.toHexString(foreignId.hashCode());
         return cleaned.length() <= maxLength ? cleaned : cleaned.substring(0, maxLength - hash.length()) + hash;
+    }
+
+    /// `id`, or `call_<position>` when the provider sent none or a blank one (some compatible gateways stream `"id":""`):
+    /// unique among the calls of one response and the same wherever that call is decoded.
+    public static String callId(@Nullable String id, int position) {
+        return id == null || id.isBlank() ? "call_" + position : id;
     }
 
     /// The JSON object of an SSE or NDJSON frame.

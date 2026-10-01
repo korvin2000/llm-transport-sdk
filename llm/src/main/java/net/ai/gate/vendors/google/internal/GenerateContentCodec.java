@@ -235,7 +235,7 @@ public final class GenerateContentCodec implements WireApi {
         if (part.bool("thought")) return List.of(Content.Reasoning.of(part.optString("text").orElse(null), signature, false, JsonNull.INSTANCE));
         Content content;
         if (part.get("functionCall").orElse(null) instanceof JsonObject call)
-            content = ToolCall.of(call.optString("id").orElseGet(() -> callId(responseId, position)), call.string("name"), call.object("args"));
+            content = ToolCall.of(call.optString("id").filter(id -> !id.isBlank()).orElseGet(() -> callId(responseId, position)), call.string("name"), call.object("args"));
         else if (part.optString("text").isPresent()) content = Content.text(part.string("text"));
         else if (part.get("inlineData").orElse(null) instanceof JsonObject data && data.optString("data").isPresent()) content = inline(data, part);
         else content = Content.Unknown.of(part.members().keySet().stream().filter(k -> !k.equals("thoughtSignature")).findFirst().orElse("part"), part);
