@@ -40,7 +40,7 @@ final class Accumulator {
             return switch (kind) {
                 case TEXT -> Content.text(text.toString());
                 case REASONING -> Content.reasoning(text.toString());
-                case TOOL -> ToolCall.of(Codecs.callId(callId, index), name == null ? "unknown" : name, text.toString());
+                case TOOL -> ToolCall.of(Codecs.callId(callId, index), name == null || name.isBlank() ? "unknown" : name, text.toString());
             };
         }
     }
