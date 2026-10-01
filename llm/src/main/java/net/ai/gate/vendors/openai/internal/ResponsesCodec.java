@@ -270,9 +270,11 @@ public final class ResponsesCodec implements WireApi {
         var response = (JsonObject) reply.json();
         var b = message(ctx, response);
         boolean compaction = COMPACTION_OBJECT.equals(response.optString("object").orElse(null));
+        int position = 0;
         for (var item : response.objects("output")) {
-            var part = compaction ? compacted(item) : part(item);
+            var part = compaction ? compacted(item) : part(item, position);
             if (part != null) b.add(part);
+            position++;
         }
         var message = b.build();
         if (message.stopReason() == StopReason.ERROR) {
@@ -335,7 +337,7 @@ public final class ResponsesCodec implements WireApi {
     }
 
     /// One output item as a content part; `null` for items without content.
-    private static @Nullable Content part(JsonObject item) {
+    private static @Nullable Content part(JsonObject item, int position) {
         return switch (item.optString("type").orElse("")) {
             case "message" -> {
                 var parts = item.objects("content");
@@ -359,7 +361,7 @@ public final class ResponsesCodec implements WireApi {
                 yield Content.Reasoning.of(text.isEmpty() ? null : text, item.optString("encrypted_content").orElse(null), false,
                         item.without("encrypted_content").without("status"));
             }
-            case "function_call" -> ToolCall.of(item.string("call_id"), item.string("name"), item.optString("arguments").orElse(""));
+            case "function_call" -> ToolCall.of(Codecs.callId(item.optString("call_id").orElse(null), position), item.string("name"), item.optString("arguments").orElse(""));
             case "compaction" -> Content.Compaction.of(null, item);
             case IMAGE -> item.optString("result").<Content>map(data -> Content.Image.of(new Content.Source.Inline(Base64.getDecoder().decode(data)),
                     "image/" + item.optString("output_format").orElse("png"), null, item.without("result"))).orElseGet(() -> Content.Unknown.of(IMAGE, item));
@@ -391,14 +393,14 @@ public final class ResponsesCodec implements WireApi {
                     case "response.output_item.added" -> {
                         var item = event.object("item");
                         yield "function_call".equals(item.optString("type").orElse(null))
-                                ? List.of(new ChatEvent.ToolCallStart(index, item.string("call_id"), item.string("name"))) : List.of();
+                                ? List.of(new ChatEvent.ToolCallStart(index, Codecs.callId(item.optString("call_id").orElse(null), index), item.string("name"))) : List.of();
                     }
                     case "response.output_text.delta" -> List.of(new ChatEvent.TextDelta(index, event.string("delta")));
                     case "response.reasoning_summary_text.delta", "response.reasoning_text.delta" ->
                             List.of(new ChatEvent.ReasoningDelta(index, event.string("delta")));
                     case "response.function_call_arguments.delta" -> List.of(new ChatEvent.ToolCallDelta(index, event.string("delta"), Json.object()));
                     case "response.output_item.done" -> {
-                        var part = part(event.object("item"));
+                        var part = part(event.object("item"), index);
                         yield part == null ? List.of() : List.of(new ChatEvent.PartEnd(index, part));
                     }
                     case "response.completed", "response.incomplete" -> List.of(ChatEvent.Done.of(message(ctx, event.object("response")).build()));

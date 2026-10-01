@@ -352,4 +352,22 @@ class AnthropicWireTest {
             assertEquals(wire.body(1), wire.body(2), "the archived reply re-encodes to the same wire body");
         }
     }
+
+    @Test
+    void aToolUseBlockWithABlankIdGetsOneFromItsPosition() {
+        var wire = new WireScript().json(REPLY.replace("\"id\":\"toolu_1\"", "\"id\":\"\"")).sse(
+                "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_3\",\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":7,\"output_tokens\":1}}}",
+                "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"\",\"name\":\"weather\",\"input\":{}}}",
+                "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}}",
+                "{\"type\":\"content_block_stop\",\"index\":0}",
+                "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":30}}",
+                "{\"type\":\"message_stop\"}");
+        try (var llm = wire.runtime(Anthropic.provider(), "ANTHROPIC_API_KEY")) {
+            var model = llm.model("anthropic", "claude-sonnet-4-5");
+            assertEquals(List.of(ToolCall.of("call_2", "weather", "{\"city\":\"Paris\"}")), llm.complete(model, ASK).toolCalls(), "third content block");
+            try (var stream = llm.stream(model, ASK)) {
+                assertEquals(List.of(ToolCall.of("call_0", "weather", "{\"city\":\"Oslo\"}")), stream.result().toolCalls());
+            }
+        }
+    }
 }

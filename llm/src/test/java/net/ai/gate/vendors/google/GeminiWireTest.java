@@ -172,4 +172,18 @@ class GeminiWireTest {
             assertEquals("fc-9", contents.get(2).objects("parts").getFirst().object("functionResponse").string("id"));
         }
     }
+
+    @Test
+    void aFunctionCallWithABlankIdGetsTheIdAMissingOneWould() {
+        var withId = "{\"responseId\":\"r3\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":"
+                + "{\"id\":\"%s\",\"name\":\"weather\",\"args\":{\"city\":\"Paris\"}}}]},\"finishReason\":\"STOP\"}]}";
+        var wire = new WireScript().json(withId.formatted("")).json(withId.formatted(" ")).json(withId.replace("\"id\":\"%s\",", ""));
+        try (var llm = wire.runtime(Gemini.provider(), "GEMINI_API_KEY")) {
+            var model = llm.model("google", "gemini-2.5-flash");
+            var blank = llm.complete(model, ASK).toolCalls().getFirst().id();
+            assertTrue(blank.startsWith("call_ai-gate_"), blank);
+            assertEquals(blank, llm.complete(model, ASK).toolCalls().getFirst().id());
+            assertEquals(blank, llm.complete(model, ASK).toolCalls().getFirst().id());
+        }
+    }
 }

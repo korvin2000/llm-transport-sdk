@@ -367,19 +367,23 @@ public final class MessagesCodec implements WireApi {
         var json = (JsonObject) reply.json();
         var b = AssistantMessage.builder(ctx.model().ref(), ID).stopReason(stop(json.optString("stop_reason").orElse(null)))
                 .usage(usage(json.object("usage"))).responseId(json.optString("id").orElse(null)).responseModel(json.optString("model").orElse(null));
-        for (var block : json.objects("content")) b.add(part(block, block.optString("text").orElse(""), block.optString("thinking").orElse(null), null));
+        int position = 0;
+        for (var block : json.objects("content"))
+            b.add(part(block, position++, block.optString("text").orElse(""), block.optString("thinking").orElse(null), null));
         return b.build();
     }
 
+    private static String callId(JsonObject block, int position) { return Codecs.callId(block.optString("id").orElse(null), position); }
+
     /// One content block; streamed blocks pass their accumulated text, thinking and tool input.
-    private static Content part(JsonObject block, String text, @Nullable String thinking, @Nullable String inputJson) {
+    private static Content part(JsonObject block, int position, String text, @Nullable String thinking, @Nullable String inputJson) {
         return switch (block.optString("type").orElse("")) {
             case "text" -> Content.Text.of(text, block.objects("citations").stream()
                     .map(c -> new Content.Citation(c.optString("title").or(() -> c.optString("document_title")).orElse(""), source(c), 0, text.length())).toList());
             case "thinking" -> Content.Reasoning.of(thinking, block.optString("signature").orElse(null), false, JsonNull.INSTANCE);
             case "redacted_thinking" -> Content.Reasoning.of(null, block.optString("data").orElse(null), true, JsonNull.INSTANCE);
-            case "tool_use" -> inputJson != null ? ToolCall.of(block.string("id"), block.string("name"), inputJson)
-                                                 : ToolCall.of(block.string("id"), block.string("name"), block.object("input"));
+            case "tool_use" -> inputJson != null ? ToolCall.of(callId(block, position), block.string("name"), inputJson)
+                                                 : ToolCall.of(callId(block, position), block.string("name"), block.object("input"));
             case "compaction" -> Content.Compaction.of(block.optString("content").orElse(null), block);   // replayed as returned
             default -> Content.Unknown.of(block.optString("type").orElse("unknown"),
                     inputJson == null || inputJson.isBlank() ? block : block.with("input", Json.parse(inputJson)));
@@ -465,15 +469,15 @@ public final class MessagesCodec implements WireApi {
                         var block = event.object("content_block");
                         blocks.put(index, new Block(block));
                         yield "tool_use".equals(block.optString("type").orElse(null))
-                                ? List.of(new ChatEvent.ToolCallStart(index, block.string("id"), block.string("name"))) : List.of();
+                                ? List.of(new ChatEvent.ToolCallStart(index, callId(block, index), block.string("name"))) : List.of();
                     }
                     case "content_block_delta" -> delta(index, event.object("delta"));
                     case "content_block_stop" -> {
                         var block = blocks.remove(index);
                         var type = block == null ? "" : block.start.optString("type").orElse("");
                         if (block == null || type.equals("tool_use") || type.equals("text") && block.start.array("citations").isEmpty()) yield List.of();
-                        yield List.of(new ChatEvent.PartEnd(index, type.equals("text") ? part(block.start, block.text.toString(), null, null)
-                                : part(block.start, "", block.text.toString(), block.input.toString())));
+                        yield List.of(new ChatEvent.PartEnd(index, type.equals("text") ? part(block.start, index, block.text.toString(), null, null)
+                                : part(block.start, index, "", block.text.toString(), block.input.toString())));
                     }
                     case "message_delta" -> {
                         event.object("delta").optString("stop_reason").ifPresent(r -> stopReason = r);

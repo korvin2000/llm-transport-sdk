@@ -13,6 +13,7 @@ import net.ai.gate.chat.stream.ChatEvent;
 import net.ai.gate.internal.json.JsonReader;
 import net.ai.gate.metadata.Usage;
 import net.ai.gate.model.ModelRef;
+import net.ai.gate.spi.protocol.Codecs;
 import org.jspecify.annotations.Nullable;
 
 /// Aggregates stream events into the reply `complete()` would return: parts by index (they may interleave), deltas
@@ -27,18 +28,19 @@ final class Accumulator {
 
     private static final class Part {
         final Kind kind;
+        final int index;
         final StringBuilder text = new StringBuilder();
         @Nullable String callId, name;
         @Nullable Content done;
 
-        Part(Kind kind) { this.kind = kind; }
+        Part(Kind kind, int index) { this.kind = kind; this.index = index; }
 
         Content content() {
             if (done != null) return done;
             return switch (kind) {
                 case TEXT -> Content.text(text.toString());
                 case REASONING -> Content.reasoning(text.toString());
-                case TOOL -> ToolCall.of(callId == null ? "call_unknown" : callId, name == null ? "unknown" : name, text.toString());
+                case TOOL -> ToolCall.of(Codecs.callId(callId, index), name == null ? "unknown" : name, text.toString());
             };
         }
     }
@@ -59,9 +61,11 @@ final class Accumulator {
             case ChatEvent.ReasoningDelta d -> { append(d.index(), Kind.REASONING, d.text()); yield d; }
             case ChatEvent.ToolCallStart s -> {
                 var part = part(s.index(), Kind.TOOL);
-                part.callId = s.callId();
+                // a blank id never replaces a real one, and a call that never had one gets a stable id from its position
+                if (!s.callId().isBlank()) part.callId = s.callId();
+                else if (part.callId == null) part.callId = Codecs.callId(null, s.index());
                 part.name = s.name();
-                yield s;
+                yield part.callId.equals(s.callId()) ? s : new ChatEvent.ToolCallStart(s.index(), part.callId, s.name());
             }
             case ChatEvent.ToolCallDelta d -> {
                 var part = append(d.index(), Kind.TOOL, d.fragment());
@@ -138,7 +142,7 @@ final class Accumulator {
         if (size > LIMIT_CHARS) throw new IllegalStateException("The reply exceeds the accumulation limit of " + LIMIT_CHARS + " characters");
     }
 
-    private Part part(int index, Kind kind) { return parts.computeIfAbsent(index, _ -> new Part(kind)); }
+    private Part part(int index, Kind kind) { return parts.computeIfAbsent(index, _ -> new Part(kind, index)); }
 
     private static Kind kindOf(Content content) {
         return content instanceof ToolCall ? Kind.TOOL : content instanceof Content.Reasoning ? Kind.REASONING : Kind.TEXT;
