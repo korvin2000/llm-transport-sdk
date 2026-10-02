@@ -34,7 +34,9 @@ public sealed interface ChatEvent {
     /// carries. `Done` stays authoritative: its usage is the call's, never a sum of updates.
     record UsageUpdate(Usage observed) implements ChatEvent { }
 
-    /// The response began; ids where the API reports them, and the upstream a gateway reports it routed to.
+    /// The response began; ids where the API reports them, and the upstream a gateway reports it routed to. A decoder
+    /// repeats it when it learns one of those later (a gateway naming its upstream in a later chunk); the repeat carries
+    /// everything known so far, and a partial reply keeps the latest.
     final class Started implements ChatEvent {
         private final @Nullable String responseId, responseModel, route;
         private Started(@Nullable String responseId, @Nullable String responseModel, @Nullable String route) {

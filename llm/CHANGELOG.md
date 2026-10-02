@@ -27,6 +27,13 @@ Changed (2026-10-02):
 - A failed call's partial reply carries its call facts (`ResponseInfo`: request id, latency, time to first output,
   attempts, route) instead of none.
 
+Fixed (2026-10-02):
+- An interrupted OpenRouter stream lost an upstream named only after the first chunk: the Chat Completions decoder saw
+  `provider` in a later chunk, but the accumulator took the route from the first `ChatEvent.Started` alone, so the
+  partial reply's `ResponseInfo.route()` was empty. The decoder now repeats `ChatEvent.Started` (everything known so far)
+  when it learns the route late, and the accumulator keeps the latest value of each fact; no new event type. A stream
+  that names the route in its first chunk still emits one `Started`.
+
 Added (source-compatible):
 - Accounting after failure: `ChatEvent.UsageUpdate`, `Usage.finalForCall()`; a partial reply (`LlmException.partial()`,
   `RequestEvent.Finished`) carries the last observed usage, priced where possible.
