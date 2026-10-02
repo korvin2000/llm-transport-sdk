@@ -337,7 +337,9 @@ public final class CompletionsCodec implements WireApi {
                     route = chunk.optString("provider").filter(p -> !p.isBlank()).orElse(null);
                     events.add(ChatEvent.Started.of(id, model, route));
                 } else if (route == null) {
+                    // a gateway may name its upstream only in a later chunk: restate the start so a cut-off reply keeps it
                     route = chunk.optString("provider").filter(p -> !p.isBlank()).orElse(null);
+                    if (route != null) events.add(ChatEvent.Started.of(id, model, route));
                 }
                 if (chunk.get("usage").orElse(null) instanceof JsonObject u) {
                     usage = usage(u);

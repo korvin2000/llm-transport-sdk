@@ -80,9 +80,10 @@ final class Accumulator {
                 yield p;
             }
             case ChatEvent.Started s -> {
-                responseId = s.responseId().orElse(null);
-                responseModel = s.responseModel().orElse(null);
-                route = s.route().orElse(null);
+                // a repeated start only adds what the decoder learned since: it never erases a fact already seen
+                responseId = s.responseId().orElse(responseId);
+                responseModel = s.responseModel().orElse(responseModel);
+                route = s.route().orElse(route);
                 yield s;
             }
             case ChatEvent.Done d -> ChatEvent.Done.of(aggregate(d.message()));

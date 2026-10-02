@@ -113,6 +113,45 @@ class StreamContractTest {
         }
     }
 
+    @Test
+    void aRouteNamedInALaterChunkReachesTheInterruptedPartialAndTheStartedEvents() {
+        var body = sse("{\"id\":\"g\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ha\"}}]}",
+                "{\"id\":\"g\",\"provider\":\"Groq\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lf\"}}]}");
+        var provider = OpenAiCompatible.ollama().toBuilder().transport(Fixtures.transport(_ -> HttpReply.of(200,
+                Map.of("content-type", List.of("text/event-stream")), new java.io.ByteArrayInputStream(body)))).build();
+        var started = new java.util.ArrayList<ChatEvent.Started>();
+        try (var llm = Fixtures.runtime(provider); var stream = llm.stream(llm.model("ollama", "test"), Conversation.of("hi"))) {
+            var error = assertThrows(LlmException.class, () -> stream.forEach(e -> {
+                if (e instanceof ChatEvent.Started s) started.add(s);
+            }));
+            assertEquals(ErrorCode.STREAM_INTERRUPTED, error.code());
+            var partial = error.partial().orElseThrow();
+            assertEquals("half", partial.text());
+            assertEquals("Groq", partial.info().route().orElseThrow());
+            assertEquals("g", partial.responseId().orElseThrow());
+            assertEquals(List.of(java.util.Optional.<String>empty(), java.util.Optional.of("Groq")), started.stream().map(ChatEvent.Started::route).toList());
+        }
+    }
+
+    @Test
+    void aRouteNamedInTheFirstChunkIsStatedOnceAndKeptByTheCompletedReply() {
+        var body = sse("{\"id\":\"g\",\"provider\":\"Groq\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ha\"}}]}",
+                "{\"id\":\"g\",\"provider\":\"Groq\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lf\"},\"finish_reason\":\"stop\"}]}", "[DONE]");
+        var provider = OpenAiCompatible.ollama().toBuilder().transport(Fixtures.transport(_ -> HttpReply.of(200,
+                Map.of("content-type", List.of("text/event-stream")), new java.io.ByteArrayInputStream(body)))).build();
+        var started = new java.util.ArrayList<ChatEvent.Started>();
+        try (var llm = Fixtures.runtime(provider); var stream = llm.stream(llm.model("ollama", "test"), Conversation.of("hi"))) {
+            stream.forEach(e -> {
+                if (e instanceof ChatEvent.Started s) started.add(s);
+            });
+            assertEquals(1, started.size());
+            assertEquals("Groq", started.getFirst().route().orElseThrow());
+            var reply = stream.result();
+            assertEquals("half", reply.text());
+            assertEquals("Groq", reply.info().route().orElseThrow());
+        }
+    }
+
     private static byte[] sse(String... data) {
         var text = new StringBuilder();
         for (var d : data) text.append("data: ").append(d).append("\n\n");

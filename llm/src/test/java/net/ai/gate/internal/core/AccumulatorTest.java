@@ -41,6 +41,18 @@ class AccumulatorTest {
     }
 
     @Test
+    void aRepeatedStartAddsTheRouteWithoutErasingWhatWasSeen() {
+        accumulator.accept(ChatEvent.Started.of("gen-1", "vendor/m-2025"));
+        accumulator.accept(new ChatEvent.TextDelta(0, "hi"));
+        assertEquals(true, accumulator.snapshot().info().route().isEmpty());
+        accumulator.accept(ChatEvent.Started.of(null, null, "Fireworks"));
+        var partial = accumulator.snapshot();
+        assertEquals("Fireworks", partial.info().route().orElseThrow());
+        assertEquals("gen-1", partial.responseId().orElseThrow());
+        assertEquals("vendor/m-2025", partial.responseModel().orElseThrow());
+    }
+
+    @Test
     void argumentsThatArriveBeforeAnyStartStillGetADistinctId() {
         accumulator.accept(new ChatEvent.ToolCallDelta(0, "{}", Json.object()));
         accumulator.accept(new ChatEvent.ToolCallDelta(1, "{}", Json.object()));
