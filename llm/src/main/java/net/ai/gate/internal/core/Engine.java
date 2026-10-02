@@ -359,7 +359,7 @@ final class Engine {
                 + warnings.stream().map(w -> w.code() + " — " + w.message()).collect(Collectors.joining("; ")));
         var reply = message.toBuilder().usage(usage).warnings(new ArrayList<>(warnings))
                 .info(ResponseInfo.builder(call.requestId, p.provider().id()).providerRequestId(call.providerRequestId())
-                        .attempts(fromCache ? 0 : call.attempts()).attemptsDetail(call.ledger()).latency(call.elapsed()).timeToFirstOutput(call.timeToFirstOutput())
+                        .route(message.info().route().orElse(null)).attempts(fromCache ? 0 : call.attempts()).attemptsDetail(call.ledger()).latency(call.elapsed()).timeToFirstOutput(call.timeToFirstOutput())
                         .fromCache(fromCache).build())
                 .build();
         var window = p.model().contextWindow();
@@ -372,9 +372,11 @@ final class Engine {
         return reply;
     }
 
-    /// `usage` with its cost from the model's prices, if they cover it; `spent` is false for cache replays.
+    /// `usage` with its cost from the model's prices, if they cover it; `spent` is false for cache replays, which
+    /// were not charged again.
     static Usage priced(Prepared p, Usage usage, boolean spent) {
-        return usage.toBuilder().cost(p.model().prices().flatMap(prices -> prices.cost(usage)).orElse(null)).spent(spent).build();
+        return usage.toBuilder().cost(p.model().prices().flatMap(prices -> prices.cost(usage)).orElse(null))
+                .charge(spent ? usage.charge().orElse(null) : null).spent(spent).build();
     }
 
     AssistantMessage decode(Prepared p, HttpReply reply) {

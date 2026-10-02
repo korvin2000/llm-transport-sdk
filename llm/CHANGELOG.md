@@ -12,6 +12,21 @@ Fixed (2026-09-30):
   read it; the sniffed bytes stay in the body. `stream()`/`start()` were never affected. Regression:
   `CodexWireTest.completeReadsEventsTheBackendSendsWithoutAContentType`.
 
+Added (source-compatible, 2026-10-02 — telemetry for hosts that compare runs):
+- `Usage.charge()` → `Charge` (currency, amount, upstream): what the provider reports it charged, separate from the
+  `Usage.cost()` estimate; OpenRouter `usage.cost` and `cost_details.upstream_inference_cost` (Chat Completions and
+  Responses). Absent when the reply states none and on response-cache replays; archived with the reply (`charge`).
+- `ResponseInfo.route()` is filled with the upstream a gateway names (OpenRouter `provider`), also for streams
+  (`ChatEvent.Started.route()`) and partial replies.
+- `Prices.tier(Usage)`: the price tier `cost(…)` applied, empty at base prices.
+
+Changed (2026-10-02):
+- `FirstOutput` / `timeToFirstOutput()` mark the model's first output — text, reasoning or a tool call — not the first
+  stream event: a usage update (Anthropic `message_start`), a lifecycle or an unmodelled event no longer counts; a
+  stream without output has none. It is a time to first output from the call's start, not a TTFT.
+- A failed call's partial reply carries its call facts (`ResponseInfo`: request id, latency, time to first output,
+  attempts, route) instead of none.
+
 Added (source-compatible):
 - Accounting after failure: `ChatEvent.UsageUpdate`, `Usage.finalForCall()`; a partial reply (`LlmException.partial()`,
   `RequestEvent.Finished`) carries the last observed usage, priced where possible.

@@ -22,12 +22,13 @@ public final class Usage {
     private final @Nullable Long input, cacheRead, cacheWrite, output, reasoning, total;
     private final Map<CacheRetention, Long> cacheWrites;
     private final @Nullable Cost cost;
+    private final @Nullable Charge charge;
     private final boolean spent, finalForCall;
     private final JsonValue raw;
 
     private Usage(Builder b) {
         input = b.input; cacheRead = b.cacheRead; cacheWrite = b.cacheWrite; output = b.output;
-        reasoning = b.reasoning; total = b.total; cost = b.cost; spent = b.spent; finalForCall = b.finalForCall; raw = b.raw;
+        reasoning = b.reasoning; total = b.total; cost = b.cost; charge = b.charge; spent = b.spent; finalForCall = b.finalForCall; raw = b.raw;
         cacheWrites = b.cacheWrites.isEmpty() ? Map.of() : Collections.unmodifiableMap(new EnumMap<>(b.cacheWrites));
     }
 
@@ -67,6 +68,9 @@ public final class Usage {
 
     /// [Model#prices()] applied; absent when a needed price or counter is unknown.
     public Optional<Cost> cost() { return Optional.ofNullable(cost); }
+    /// What the provider reports it charged (OpenRouter `usage.cost`), separate from the [#cost()] estimate; absent
+    /// when the reply states none and for replies replayed from the response cache.
+    public Optional<Charge> charge() { return Optional.ofNullable(charge); }
     /// `false` for replies replayed from the response cache: nothing was billed.
     public boolean spent() { return spent; }
     /// `false` while the call may still report more: counters may grow and absent buckets may still arrive.
@@ -77,7 +81,7 @@ public final class Usage {
     public Builder toBuilder() {
         var b = new Builder();
         b.input = input; b.cacheRead = cacheRead; b.cacheWrite = cacheWrite; b.output = output;
-        b.reasoning = reasoning; b.total = total; b.cost = cost; b.spent = spent; b.finalForCall = finalForCall; b.raw = raw;
+        b.reasoning = reasoning; b.total = total; b.cost = cost; b.charge = charge; b.spent = spent; b.finalForCall = finalForCall; b.raw = raw;
         b.cacheWrites.putAll(cacheWrites);
         return b;
     }
@@ -88,14 +92,14 @@ public final class Usage {
         return o instanceof Usage u && Objects.equals(input, u.input) && Objects.equals(cacheRead, u.cacheRead)
                 && cacheWrite().equals(u.cacheWrite()) && Objects.equals(output, u.output)
                 && Objects.equals(reasoning, u.reasoning) && Objects.equals(total, u.total)
-                && cacheWrites.equals(u.cacheWrites) && Objects.equals(cost, u.cost) && spent == u.spent && finalForCall == u.finalForCall;
+                && cacheWrites.equals(u.cacheWrites) && Objects.equals(cost, u.cost) && Objects.equals(charge, u.charge) && spent == u.spent && finalForCall == u.finalForCall;
     }
 
-    @Override public int hashCode() { return Objects.hash(input, cacheRead, cacheWrite(), cacheWrites, output, reasoning, total, cost, spent, finalForCall); }
+    @Override public int hashCode() { return Objects.hash(input, cacheRead, cacheWrite(), cacheWrites, output, reasoning, total, cost, charge, spent, finalForCall); }
 
     @Override public String toString() {
         return "Usage[input=" + text(input) + ", output=" + text(output) + ", cacheRead=" + text(cacheRead)
-                + ", cacheWrite=" + (cacheWrites.isEmpty() ? text(cacheWrite) : cacheWrites) + ", cost=" + (cost == null ? "?" : cost)
+                + ", cacheWrite=" + (cacheWrites.isEmpty() ? text(cacheWrite) : cacheWrites) + ", cost=" + (cost == null ? "?" : cost) + (charge == null ? "" : ", charged=" + charge)
                 + (spent ? "" : ", replayed") + (finalForCall ? "" : ", observed") + "]";
     }
 
@@ -106,6 +110,7 @@ public final class Usage {
         private @Nullable Long input, cacheRead, cacheWrite, output, reasoning, total;
         private final Map<CacheRetention, Long> cacheWrites = new EnumMap<>(CacheRetention.class);
         private @Nullable Cost cost;
+        private @Nullable Charge charge;
         private boolean spent = true, finalForCall = true;
         private JsonValue raw = JsonNull.INSTANCE;
 
@@ -124,6 +129,7 @@ public final class Usage {
         public Builder reasoning(long tokens) { reasoning = count(tokens); return this; }
         public Builder total(long tokens) { total = count(tokens); return this; }
         public Builder cost(@Nullable Cost value) { cost = value; return this; }
+        public Builder charge(@Nullable Charge value) { charge = value; return this; }
         public Builder spent(boolean value) { spent = value; return this; }
         public Builder finalForCall(boolean value) { finalForCall = value; return this; }
         public Builder raw(JsonValue value) { raw = value; return this; }

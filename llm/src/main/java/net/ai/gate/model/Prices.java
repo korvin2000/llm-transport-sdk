@@ -44,7 +44,7 @@ public final class Prices {
     /// The cost of `usage`; absent when input or output is unreported or a price for non-zero tokens is unknown.
     /// Unreported cache counters count as zero.
     public Optional<Cost> cost(Usage usage) {
-        var p = tierFor(usage.totalInput().orElse(usage.input().orElse(0)));
+        var p = tier(usage).map(t -> withTier(t.prices())).orElse(this);
         var in = part(usage.input(), p.input, true);
         var out = part(usage.output(), p.output, true);
         var read = part(usage.cacheRead(), p.cacheRead, false);
@@ -57,15 +57,21 @@ public final class Prices {
         return Optional.of(new Cost(currency, in, read, write, out, in.add(read).add(write).add(out)));
     }
 
-    private Prices tierFor(long inputTokens) {
-        var chosen = this;
+    /// The tier [#cost(Usage)] prices `usage` with — the highest whose threshold its total input exceeds; empty at
+    /// base prices.
+    public Optional<Tier> tier(Usage usage) {
+        long inputTokens = usage.totalInput().orElse(usage.input().orElse(0));
+        Tier applied = null;
         for (var tier : tiers) {
             if (inputTokens <= tier.inputTokensAbove()) break;
-            var t = tier.prices();
-            chosen = new Builder(currency).input(or(t.input, input)).output(or(t.output, output))
-                    .cacheRead(or(t.cacheRead, cacheRead)).cacheWrite(or(t.cacheWrite, cacheWrite)).cacheWriteLong(or(t.cacheWriteLong, cacheWriteLong)).build();
+            applied = tier;
         }
-        return chosen;
+        return Optional.ofNullable(applied);
+    }
+
+    private Prices withTier(Prices t) {
+        return new Builder(currency).input(or(t.input, input)).output(or(t.output, output))
+                .cacheRead(or(t.cacheRead, cacheRead)).cacheWrite(or(t.cacheWrite, cacheWrite)).cacheWriteLong(or(t.cacheWriteLong, cacheWriteLong)).build();
     }
 
     private static @Nullable BigDecimal or(@Nullable BigDecimal preferred, @Nullable BigDecimal fallback) {

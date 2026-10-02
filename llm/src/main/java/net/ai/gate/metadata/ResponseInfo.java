@@ -36,12 +36,16 @@ public final class ResponseInfo {
     public String providerId() { return providerId; }
     /// The provider's request id, for support tickets.
     public Optional<String> providerRequestId() { return Optional.ofNullable(providerRequestId); }
-    /// The upstream a gateway reports it used.
+    /// The upstream a gateway reports it routed the call to (OpenRouter `provider`); absent where the reply names none.
+    /// The model that answered is `AssistantMessage.responseModel()`.
     public Optional<String> route() { return Optional.ofNullable(route); }
     public int attempts() { return attempts; }
     /// One entry per attempt, in order; empty for replies not obtained by a call (cached, deserialized, constructed).
     public List<Attempt> attemptsDetail() { return attemptsDetail; }
+    /// From the call's start to its reply (or failure): every attempt, backoff and the whole stream.
     public Duration latency() { return latency; }
+    /// From the call's start to the model's first output (see `RequestEvent.FirstOutput`) — not a time to first token;
+    /// absent when no output arrived.
     public Optional<Duration> timeToFirstOutput() { return Optional.ofNullable(timeToFirstOutput); }
     public boolean fromCache() { return fromCache; }
     public Optional<RateLimits> rateLimits() { return Optional.ofNullable(rateLimits); }

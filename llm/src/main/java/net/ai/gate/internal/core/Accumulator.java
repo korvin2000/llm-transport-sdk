@@ -11,6 +11,7 @@ import net.ai.gate.chat.content.ToolCall;
 import net.ai.gate.chat.content.ToolResult;
 import net.ai.gate.chat.stream.ChatEvent;
 import net.ai.gate.internal.json.JsonReader;
+import net.ai.gate.metadata.ResponseInfo;
 import net.ai.gate.metadata.Usage;
 import net.ai.gate.model.ModelRef;
 import net.ai.gate.spi.protocol.Codecs;
@@ -48,7 +49,7 @@ final class Accumulator {
     private final ModelRef model;
     private final String api;
     private final TreeMap<Integer, Part> parts = new TreeMap<>();
-    private @Nullable String responseId, responseModel;
+    private @Nullable String responseId, responseModel, route;
     private @Nullable Usage observed;
     private long size, outputChars;
 
@@ -81,6 +82,7 @@ final class Accumulator {
             case ChatEvent.Started s -> {
                 responseId = s.responseId().orElse(null);
                 responseModel = s.responseModel().orElse(null);
+                route = s.route().orElse(null);
                 yield s;
             }
             case ChatEvent.Done d -> ChatEvent.Done.of(aggregate(d.message()));
@@ -97,6 +99,7 @@ final class Accumulator {
     synchronized AssistantMessage snapshot() {
         var b = AssistantMessage.builder(model, api).content(contents()).stopReason(StopReason.ABORTED)
                 .responseId(responseId).responseModel(responseModel);
+        if (route != null) b.info(ResponseInfo.empty().toBuilder().route(route).build());
         if (observed != null) b.usage(observed);
         int index = 0;
         for (var part : parts.values()) {
@@ -120,6 +123,7 @@ final class Accumulator {
         if (!parts.isEmpty()) b.content(contents());
         if (fromDecoder.responseId().isEmpty()) b.responseId(responseId);
         if (fromDecoder.responseModel().isEmpty()) b.responseModel(responseModel);
+        if (fromDecoder.info().route().isEmpty() && route != null) b.info(fromDecoder.info().toBuilder().route(route).build());
         return b.build();
     }
 

@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Currency;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -34,9 +35,12 @@ import net.ai.gate.chat.tool.FunctionTool;
 import net.ai.gate.chat.tool.ProviderTool;
 import net.ai.gate.chat.tool.ToolChoice;
 import net.ai.gate.json.Json;
+import net.ai.gate.json.JsonNumber;
 import net.ai.gate.json.JsonObject;
 import net.ai.gate.json.JsonString;
 import net.ai.gate.json.JsonValue;
+import net.ai.gate.metadata.Charge;
+import net.ai.gate.metadata.ResponseInfo;
 import net.ai.gate.metadata.Usage;
 import net.ai.gate.metadata.Warning;
 import net.ai.gate.model.ReasoningLevel;
@@ -59,6 +63,8 @@ import net.ai.gate.vendors.openai.OpenAiCompletionsCompat;
 /// `format` or `wav` — and replays as the transcript, since audio ids expire. Usage arrives in the last chunk (with
 /// `stream_options.include_usage`) as a `UsageUpdate` before the end; there is no counting endpoint. Replay keeps
 /// text, tool calls with their ids and raw arguments, and reasoning only where `reasoningContentReplay` is set.
+/// A gateway's own facts are kept where the reply states them: OpenRouter's charge (`usage.cost`, USD credits) as
+/// `Usage.charge()`, and the upstream it routed to (`provider`) as `ResponseInfo.route()`.
 public final class CompletionsCodec implements WireApi {
     public static final CompletionsCodec INSTANCE = new CompletionsCodec();
     private static final String ID = "openai-completions";
@@ -66,6 +72,7 @@ public final class CompletionsCodec implements WireApi {
     private static final JsonObject EPHEMERAL = Json.object("type", "ephemeral");
     private static final Pattern MISTRAL_ID = Pattern.compile("[a-zA-Z0-9]{9}");
     private static final String BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    private static final Currency USD = Currency.getInstance("USD");
 
     private CompletionsCodec() { }
 
@@ -254,7 +261,13 @@ public final class CompletionsCodec implements WireApi {
             n++;
         }
         return b.stopReason(stop(choice.optString("finish_reason").orElse(null))).usage(usage(json.object("usage")))
-                .responseId(json.optString("id").orElse(null)).responseModel(json.optString("model").orElse(null)).build();
+                .responseId(json.optString("id").orElse(null)).responseModel(json.optString("model").orElse(null))
+                .info(routed(json.optString("provider").orElse(null))).build();
+    }
+
+    /// Call facts the core completes: only the route a gateway states, else none.
+    static ResponseInfo routed(@Nullable String route) {
+        return route == null || route.isBlank() ? ResponseInfo.empty() : ResponseInfo.empty().toBuilder().route(route).build();
     }
 
     private static Optional<String> reasoningOf(JsonObject message) {
@@ -280,7 +293,16 @@ public final class CompletionsCodec implements WireApi {
         u.optLong("completion_tokens").ifPresent(b::output);
         u.object("completion_tokens_details").optLong("reasoning_tokens").ifPresent(b::reasoning);
         u.optLong("total_tokens").ifPresent(b::total);
+        charge(b, u);
         return b.build();
+    }
+
+    /// OpenRouter's charge: `cost` is what the account was charged, `cost_details.upstream_inference_cost` the upstream
+    /// provider's own charge, both in USD; a missing or negative amount is no charge stated.
+    static void charge(Usage.Builder b, JsonObject u) {
+        if (!(u.get("cost").orElse(null) instanceof JsonNumber cost) || cost.value().signum() < 0) return;
+        var upstream = u.object("cost_details").get("upstream_inference_cost").orElse(null) instanceof JsonNumber n && n.value().signum() >= 0 ? n.value() : null;
+        b.charge(new Charge(USD, cost.value(), upstream));
     }
 
     /// The OpenAI family's input accounting: `total` includes cache reads and writes. Writes have no bucket of their
@@ -298,7 +320,7 @@ public final class CompletionsCodec implements WireApi {
             private final Map<String, Integer> parts = new HashMap<>();
             private final StringBuilder refusal = new StringBuilder(), transcript = new StringBuilder();
             private final ByteArrayOutputStream audio = new ByteArrayOutputStream();
-            private @Nullable String finish, id, model;
+            private @Nullable String finish, id, model, route;
             private Usage usage = Usage.empty();
             private boolean started, done;
 
@@ -312,7 +334,10 @@ public final class CompletionsCodec implements WireApi {
                     started = true;
                     id = chunk.optString("id").orElse(null);
                     model = chunk.optString("model").orElse(null);
-                    events.add(ChatEvent.Started.of(id, model));
+                    route = chunk.optString("provider").filter(p -> !p.isBlank()).orElse(null);
+                    events.add(ChatEvent.Started.of(id, model, route));
+                } else if (route == null) {
+                    route = chunk.optString("provider").filter(p -> !p.isBlank()).orElse(null);
                 }
                 if (chunk.get("usage").orElse(null) instanceof JsonObject u) {
                     usage = usage(u);
@@ -358,7 +383,7 @@ public final class CompletionsCodec implements WireApi {
                 if (parts.containsKey("audio"))
                     events.add(new ChatEvent.PartEnd(index("audio"), Content.Audio.of(audio.toByteArray(), "pcm16", transcript.isEmpty() ? null : transcript.toString())));
                 events.add(ChatEvent.Done.of(AssistantMessage.builder(ctx.model().ref(), ID).stopReason(stop(finish)).usage(usage)
-                        .responseId(id).responseModel(model).build()));
+                        .responseId(id).responseModel(model).info(routed(route)).build()));
                 return events;
             }
 

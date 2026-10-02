@@ -34,13 +34,18 @@ public sealed interface ChatEvent {
     /// carries. `Done` stays authoritative: its usage is the call's, never a sum of updates.
     record UsageUpdate(Usage observed) implements ChatEvent { }
 
-    /// The response began; ids where the API reports them.
+    /// The response began; ids where the API reports them, and the upstream a gateway reports it routed to.
     final class Started implements ChatEvent {
-        private final @Nullable String responseId, responseModel;
-        private Started(@Nullable String responseId, @Nullable String responseModel) { this.responseId = responseId; this.responseModel = responseModel; }
-        public static Started of(@Nullable String responseId, @Nullable String responseModel) { return new Started(responseId, responseModel); }
+        private final @Nullable String responseId, responseModel, route;
+        private Started(@Nullable String responseId, @Nullable String responseModel, @Nullable String route) {
+            this.responseId = responseId; this.responseModel = responseModel; this.route = route;
+        }
+        public static Started of(@Nullable String responseId, @Nullable String responseModel) { return new Started(responseId, responseModel, null); }
+        public static Started of(@Nullable String responseId, @Nullable String responseModel, @Nullable String route) { return new Started(responseId, responseModel, route); }
         public Optional<String> responseId() { return Optional.ofNullable(responseId); }
         public Optional<String> responseModel() { return Optional.ofNullable(responseModel); }
+        /// See `ResponseInfo.route()`.
+        public Optional<String> route() { return Optional.ofNullable(route); }
         @Override public String toString() { return "Started[" + responseId + "]"; }
     }
 

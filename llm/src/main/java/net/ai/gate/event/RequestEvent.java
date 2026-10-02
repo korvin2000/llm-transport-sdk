@@ -38,7 +38,9 @@ public sealed interface RequestEvent extends LlmEvent {
         public boolean streaming() { return streaming; }
     }
 
-    /// The first output of the call arrived (first stream event, or the non-streamed response).
+    /// The model's first output arrived: in a stream, the first text, reasoning or tool-call event — not the first
+    /// byte, nor a usage or lifecycle event; for a non-streamed call, the decoded response. `latency` runs from the
+    /// call's start (credentials, connection, retries and backoff included): a time to first output, not a TTFT.
     final class FirstOutput extends CallEventBase implements RequestEvent {
         private final Duration latency;
 
