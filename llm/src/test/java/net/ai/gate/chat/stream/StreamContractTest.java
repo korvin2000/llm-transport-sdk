@@ -17,6 +17,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import net.ai.gate.chat.Conversation;
 import net.ai.gate.chat.StopReason;
 import net.ai.gate.chat.options.ChatOptions;
+import net.ai.gate.error.ErrorCode;
+import net.ai.gate.error.LlmException;
 import net.ai.gate.error.RequestCancelledException;
 import net.ai.gate.error.RequestTimeoutException;
 import net.ai.gate.event.RequestEvent;
@@ -62,6 +64,59 @@ class StreamContractTest {
                 assertEquals(RequestEvent.Finished.Outcome.FAILED, events.events(RequestEvent.Finished.class).getFirst().outcome());
             }
         }
+    }
+
+    @Test
+    void usageAndLifecycleEventsAreNotTheFirstOutput() {
+        var silent = sse("{\"id\":\"c\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":0}}",
+                "{\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}", "[DONE]");
+        var spoken = sse("{\"id\":\"d\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":0}}",
+                "{\"id\":\"d\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}", "[DONE]");
+        var bodies = new java.util.ArrayDeque<>(List.of(silent, spoken));
+        var provider = OpenAiCompatible.ollama().toBuilder().transport(Fixtures.transport(_ -> HttpReply.of(200,
+                Map.of("content-type", List.of("text/event-stream")), new java.io.ByteArrayInputStream(bodies.removeFirst())))).build();
+        var events = new RecordingListener();
+        try (var llm = Fixtures.runtime(provider)) {
+            llm.addListener(events);
+            var model = llm.model("ollama", "test");
+            try (var stream = llm.stream(model, Conversation.of("hi"))) {
+                var reply = stream.result();
+                assertTrue(reply.info().timeToFirstOutput().isEmpty(), "usage alone is not output");
+                assertTrue(events.events(RequestEvent.FirstOutput.class).isEmpty());
+                assertTrue(events.events(RequestEvent.Finished.class).getFirst().timeToFirstOutput().isEmpty());
+            }
+            try (var stream = llm.stream(model, Conversation.of("hi"))) {
+                var reply = stream.result();
+                var first = reply.info().timeToFirstOutput().orElseThrow();
+                assertTrue(first.compareTo(reply.info().latency()) <= 0);
+                assertEquals(List.of(first), events.events(RequestEvent.FirstOutput.class).stream().map(RequestEvent.FirstOutput::latency).toList());
+            }
+        }
+    }
+
+    @Test
+    void aPartialReplyKeepsItsCallFacts() {
+        var body = sse("{\"id\":\"g\",\"provider\":\"Groq\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half\"}}]}");
+        var provider = OpenAiCompatible.ollama().toBuilder().transport(Fixtures.transport(_ -> HttpReply.of(200,
+                Map.of("content-type", List.of("text/event-stream")), new java.io.ByteArrayInputStream(body)))).build();
+        try (var llm = Fixtures.runtime(provider); var stream = llm.stream(llm.model("ollama", "test"), Conversation.of("hi"))) {
+            var error = assertThrows(LlmException.class, stream::result);
+            assertEquals(ErrorCode.STREAM_INTERRUPTED, error.code());
+            var partial = error.partial().orElseThrow();
+            assertEquals("half", partial.text());
+            var info = partial.info();
+            assertEquals(error.requestId().orElseThrow(), info.requestId());
+            assertEquals("Groq", info.route().orElseThrow());
+            assertEquals(1, info.attempts());
+            assertEquals(ErrorCode.STREAM_INTERRUPTED, info.attemptsDetail().getFirst().error());
+            assertTrue(info.timeToFirstOutput().orElseThrow().compareTo(info.latency()) <= 0);
+        }
+    }
+
+    private static byte[] sse(String... data) {
+        var text = new StringBuilder();
+        for (var d : data) text.append("data: ").append(d).append("\n\n");
+        return text.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
     @Test

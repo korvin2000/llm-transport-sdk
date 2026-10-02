@@ -224,7 +224,7 @@ final class DefaultChatStream implements ChatStream {
         for (var event : events) {
             if (ended) return;
             var delivered = accumulator.accept(event);
-            if (!(delivered instanceof ChatEvent.Started)) call.firstOutput();
+            if (output(delivered)) call.firstOutput();
             if (delivered instanceof ChatEvent.Done done) {
                 var finished = engine.finish(call, prepared, done.message(), fromCache);
                 pending.add(ChatEvent.Done.of(finished));
@@ -233,6 +233,15 @@ final class DefaultChatStream implements ChatStream {
                 pending.add(delivered);
             }
         }
+    }
+
+    /// The model's own output, not the first byte: lifecycle, usage and unmodelled events (Anthropic's `message_start`
+    /// usage, a keep-alive) do not end the wait for it.
+    private static boolean output(ChatEvent event) {
+        return switch (event) {
+            case ChatEvent.TextDelta _, ChatEvent.ReasoningDelta _, ChatEvent.ToolCallStart _, ChatEvent.ToolCallDelta _, ChatEvent.PartEnd _ -> true;
+            case ChatEvent.Started _, ChatEvent.UsageUpdate _, ChatEvent.Unknown _, ChatEvent.Done _ -> false;
+        };
     }
 
     private void progress() {

@@ -40,6 +40,7 @@ import net.ai.gate.json.JsonString;
 import net.ai.gate.json.JsonValue;
 import net.ai.gate.error.ErrorCode;
 import net.ai.gate.metadata.Attempt;
+import net.ai.gate.metadata.Charge;
 import net.ai.gate.metadata.Cost;
 import net.ai.gate.metadata.ResponseInfo;
 import net.ai.gate.metadata.Usage;
@@ -217,6 +218,15 @@ public final class ConversationJson {
         json.put("spent", Json.valueOf(u.spent()));
         if (!u.finalForCall()) json.put("final", Json.valueOf(false));
         u.cost().ifPresent(c -> json.put("cost", writeCost(c)));
+        u.charge().ifPresent(c -> json.put("charge", writeCharge(c)));
+        return JsonObject.of(json);
+    }
+
+    private static JsonValue writeCharge(Charge c) {
+        var json = new LinkedHashMap<String, JsonValue>();
+        json.put("currency", Json.valueOf(c.currency().getCurrencyCode()));
+        json.put("amount", JsonNumber.of(c.amount()));
+        if (c.upstream() != null) json.put("upstream", JsonNumber.of(c.upstream()));
         return JsonObject.of(json);
     }
 
@@ -471,7 +481,17 @@ public final class ConversationJson {
         var cost = json.get("cost").orElse(null);
         if (cost instanceof JsonObject co) b.cost(readCost(co, path + ".cost"));
         else if (cost != null && !(cost instanceof JsonNull)) throw fail(path + ".cost", "expected an object");
+        var charge = json.get("charge").orElse(null);
+        if (charge instanceof JsonObject ch) b.charge(readCharge(ch, path + ".charge"));
+        else if (charge != null && !(charge instanceof JsonNull)) throw fail(path + ".charge", "expected an object");
         return b.build();
+    }
+
+    private static Charge readCharge(JsonObject json, String path) {
+        var upstream = json.get("upstream").orElse(null);
+        return new Charge(parseCurrency(str(member(json, "currency", path + ".currency"), path + ".currency"), path + ".currency"),
+                num(member(json, "amount", path + ".amount"), path + ".amount").value(),
+                upstream == null || upstream instanceof JsonNull ? null : num(upstream, path + ".upstream").value());
     }
 
     private static Cost readCost(JsonObject json, String path) {

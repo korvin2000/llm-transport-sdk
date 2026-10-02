@@ -7,8 +7,12 @@ import net.ai.gate.chat.stream.ChatEvent
 import net.ai.gate.json.Json
 import net.ai.gate.model.Model
 import net.ai.gate.testing.FakeProvider
+import net.ai.gate.vendors.WireScript
+import net.ai.gate.vendors.openai.OpenAiCompatible
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
+import java.math.BigDecimal
 
 /** The Java API used from Kotlin without a wrapper: builders, consumer-builders, sealed events, `use`. */
 class KotlinUsageTest {
@@ -36,5 +40,22 @@ class KotlinUsageTest {
             assertEquals("kotlin", Json.`object`("lang", "kotlin").string("lang")) // `object` is a Kotlin keyword
         }
         fake.assertAllRepliesConsumed()
+    }
+
+    @Test
+    fun `kotlin callers read the charge, the route and the timings with their nullability`() {
+        val wire = WireScript().json(
+            """{"provider":"DeepInfra","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],""" +
+                """"usage":{"prompt_tokens":3,"completion_tokens":1,"cost":0.5}}""",
+        )
+        wire.runtime(OpenAiCompatible.openRouter(), "OPENROUTER_API_KEY").use { llm ->
+            val reply = llm.complete(llm.model("openrouter", "anthropic/claude-sonnet-4.5"), Conversation.of("hi"))
+            val charge = reply.usage().charge().orElseThrow()
+            assertEquals(0, BigDecimal("0.5").compareTo(charge.amount()))
+            val upstream: BigDecimal? = charge.upstream() // @Nullable reaches Kotlin as a nullable type
+            assertNull(upstream)
+            assertEquals("DeepInfra", reply.info().route().orElseThrow())
+            assertEquals(true, reply.info().timeToFirstOutput().isPresent)
+        }
     }
 }

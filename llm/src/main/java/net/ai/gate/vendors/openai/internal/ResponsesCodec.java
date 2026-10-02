@@ -379,6 +379,7 @@ public final class ResponsesCodec implements WireApi {
         u.optLong("output_tokens").ifPresent(b::output);
         u.object("output_tokens_details").optLong("reasoning_tokens").ifPresent(b::reasoning);
         u.optLong("total_tokens").ifPresent(b::total);
+        CompletionsCodec.charge(b, u);
         return b.build();
     }
 

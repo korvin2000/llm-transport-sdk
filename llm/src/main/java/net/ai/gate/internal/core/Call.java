@@ -46,6 +46,7 @@ import net.ai.gate.internal.http.Redaction;
 import net.ai.gate.lifecycle.CancelToken;
 import net.ai.gate.lifecycle.Registration;
 import net.ai.gate.metadata.Attempt;
+import net.ai.gate.metadata.ResponseInfo;
 import net.ai.gate.metadata.Usage;
 import net.ai.gate.model.ModelRef;
 import net.ai.gate.spi.http.HttpCall;
@@ -127,8 +128,14 @@ final class Call {
         var failure = error instanceof UncheckedIOException io ? classify(io.getCause()) : error;
         if (failure instanceof LlmException e) {
             var available = partial != null ? partial : e.partial().orElse(null);
+            endAttempt(e.code(), e.outcomeUnknown());
+            // the call facts of a partial reply: its timings survive the failure
+            var info = available == null || !available.info().requestId().isEmpty() ? null
+                    : ResponseInfo.builder(requestId, provider.id()).providerRequestId(providerRequestId).route(available.info().route().orElse(null))
+                            .attempts(attempts).attemptsDetail(List.copyOf(ledger)).latency(elapsed()).timeToFirstOutput(firstOutput).build();
             var marked = available == null ? null : available.toBuilder()
-                    .stopReason(e instanceof RequestCancelledException ? StopReason.ABORTED : StopReason.ERROR).errorMessage(e.getMessage()).build();
+                    .stopReason(e instanceof RequestCancelledException ? StopReason.ABORTED : StopReason.ERROR).errorMessage(e.getMessage())
+                    .info(info != null ? info : available.info()).build();
             failure = HttpErrors.withFacts(e, requestId, provider.id(), attempts, marked);
             finished(failure instanceof RequestCancelledException ? Outcome.CANCELLED : Outcome.FAILED, marked, (LlmException) failure, false);
         } else {

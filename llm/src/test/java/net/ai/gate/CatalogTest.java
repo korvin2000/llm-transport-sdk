@@ -105,5 +105,7 @@ class CatalogTest {
         var large = prices.cost(Usage.builder().input(300_000).cacheRead(0).cacheWrite(0).output(1_000).build()).orElseThrow();
         assertEquals(new BigDecimal("0.765"), large.total().stripTrailingZeros());
         assertTrue(prices.cost(Usage.builder().output(10).build()).isEmpty(), "unreported input makes cost absent");
+        assertTrue(prices.tier(Usage.builder().input(100_000).cacheRead(0).cacheWrite(0).output(1_000).build()).isEmpty(), "base prices");
+        assertEquals(200_000, prices.tier(Usage.builder().input(300_000).cacheRead(0).cacheWrite(0).output(1_000).build()).orElseThrow().inputTokensAbove());
     }
 }

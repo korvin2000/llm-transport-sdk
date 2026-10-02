@@ -5,7 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.Currency;
 import java.util.List;
 
 import net.ai.gate.chat.AssistantMessage;
@@ -24,6 +26,7 @@ import net.ai.gate.event.RequestEvent;
 import net.ai.gate.testing.RecordingListener;
 import net.ai.gate.json.Json;
 import net.ai.gate.json.JsonObject;
+import net.ai.gate.metadata.Charge;
 import net.ai.gate.model.Model;
 import net.ai.gate.model.ModelRef;
 import net.ai.gate.model.ReasoningLevel;
@@ -232,6 +235,50 @@ class OpenAiWireTest {
             assertEquals(Json.object("effort", "low"), wire.body(0).get("reasoning").orElseThrow());
             assertEquals("abc", wire.calls().getFirst().headers().get("x-session-id"));
             assertEquals("r", reply.reasoningText().orElseThrow());
+        }
+    }
+
+    @Test
+    void openRouterChargeRouteAndReasoningTokensReachTheReply() {
+        var wire = new WireScript()
+                .json("{\"id\":\"gen-1\",\"provider\":\"Anthropic\",\"model\":\"anthropic/claude-4.5-sonnet-20250929\","
+                        + "\"choices\":[{\"message\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],"
+                        + "\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":12,\"total_tokens\":42,\"cost\":0.000123,"
+                        + "\"cost_details\":{\"upstream_inference_cost\":0.0001},\"prompt_tokens_details\":{\"cached_tokens\":10},"
+                        + "\"completion_tokens_details\":{\"reasoning_tokens\":8}}}")
+                .sse("{\"id\":\"gen-2\",\"provider\":\"Google\",\"model\":\"google/gemini-2.5-pro\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}",
+                        "{\"id\":\"gen-2\",\"provider\":\"Google\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":\"stop\"}]}",
+                        "{\"id\":\"gen-2\",\"provider\":\"Google\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,"
+                                + "\"total_tokens\":7,\"cost\":0.00002,\"completion_tokens_details\":{\"reasoning_tokens\":0}}}",
+                        "[DONE]")
+                .json("{\"choices\":[{\"message\":{\"content\":\"plain\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}");
+        var usd = Currency.getInstance("USD");
+        try (var llm = wire.runtime(OpenAiCompatible.openRouter(), "OPENROUTER_API_KEY")) {
+            var model = llm.model("openrouter", "anthropic/claude-sonnet-4.5");
+            var reply = llm.complete(model, Conversation.of("hi"));
+            var charge = reply.usage().charge().orElseThrow();
+            assertEquals(usd, charge.currency());
+            assertEquals(0, new BigDecimal("0.000123").compareTo(charge.amount()));
+            assertEquals(0, new BigDecimal("0.0001").compareTo(charge.upstream()));
+            assertEquals(8, reply.usage().reasoning().orElseThrow());
+            assertEquals("Anthropic", reply.info().route().orElseThrow());
+            assertEquals("anthropic/claude-4.5-sonnet-20250929", reply.responseModel().orElseThrow());
+            assertFalse(reply.info().requestId().isEmpty(), "the core completes the call facts and keeps the route");
+            var archived = AssistantMessage.fromJson(reply.toJson());
+            assertEquals(charge, archived.usage().charge().orElseThrow());
+            assertEquals("Anthropic", archived.info().route().orElseThrow());
+
+            AssistantMessage streamed;
+            try (var stream = llm.stream(model, Conversation.of("hi"))) { streamed = stream.result(); }
+            assertEquals(new Charge(usd, new BigDecimal("0.00002"), null), streamed.usage().charge().orElseThrow());
+            assertEquals(0, streamed.usage().reasoning().orElseThrow(), "a reported zero stays zero");
+            assertEquals("Google", streamed.info().route().orElseThrow());
+            assertTrue(streamed.info().timeToFirstOutput().isPresent());
+
+            var plain = llm.complete(model, Conversation.of("hi"));
+            assertTrue(plain.usage().charge().isEmpty(), "no charge stated: absent, never zero");
+            assertTrue(plain.usage().reasoning().isEmpty());
+            assertTrue(plain.info().route().isEmpty());
         }
     }
 

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.util.List;
 
+import net.ai.gate.chat.AssistantMessage;
 import net.ai.gate.chat.content.ToolCall;
 import net.ai.gate.chat.stream.ChatEvent;
 import net.ai.gate.json.Json;
@@ -27,6 +28,16 @@ class AccumulatorTest {
         accumulator.accept(new ChatEvent.ToolCallStart(0, "call_a", "weather"));
         assertEquals(new ChatEvent.ToolCallStart(0, "call_a", "weather"), accumulator.accept(new ChatEvent.ToolCallStart(0, "", "weather")));
         assertEquals(List.of(ToolCall.of("call_a", "weather", "")), accumulator.snapshot().content());
+    }
+
+    @Test
+    void theRouteOfTheStartReachesThePartialAndTheFinalReply() {
+        accumulator.accept(ChatEvent.Started.of("gen-1", "vendor/m-2025", "Fireworks"));
+        accumulator.accept(new ChatEvent.TextDelta(0, "hi"));
+        assertEquals("Fireworks", accumulator.snapshot().info().route().orElseThrow());
+        var done = (ChatEvent.Done) accumulator.accept(ChatEvent.Done.of(AssistantMessage.builder(new ModelRef("test", "m"), "test-api").build()));
+        assertEquals("Fireworks", done.message().info().route().orElseThrow());
+        assertEquals("vendor/m-2025", done.message().responseModel().orElseThrow());
     }
 
     @Test
